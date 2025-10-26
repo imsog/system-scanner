@@ -22,7 +22,10 @@ try {
 
 # Безопасность
 try {$fw = Get-NetFirewallProfile | ForEach-Object {"  - $($_.Name): $($_.Enabled)"} | Out-String} catch {$fw = "Firewall info unavailable"}
-try {$def = Get-MpComputerStatus; $defStatus = "Antivirus: $($def.AntivirusEnabled), Real-time: $($def.RealTimeProtectionEnabled)"} catch {$defStatus = "Defender info unavailable"}
+try {
+    $def = Get-MpComputerStatus
+    $defStatus = "Antivirus: $($def.AntivirusEnabled)`nReal-time: $($def.RealTimeProtectionEnabled)"
+} catch {$defStatus = "Defender info unavailable"}
 try {$rdp = if ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction 0).fDenyTSConnections -eq 1) {'Disabled'} else {'Enabled'}} catch {$rdp = "RDP status unavailable"}
 
 # Дополнительная информация
@@ -66,7 +69,8 @@ $wifi
 === SECURITY STATUS ===
 Firewall: 
 $fw
-Windows Defender: $defStatus
+Windows Defender: $($def.AntivirusEnabled)
+Real-time Protection: $($def.RealTimeProtectionEnabled)
 RDP Access: $rdp
 
 === INSTALLED SOFTWARE ===
