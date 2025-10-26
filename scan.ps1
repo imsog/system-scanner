@@ -22,11 +22,23 @@ try {
 
 # Безопасность
 try {$fw = Get-NetFirewallProfile | ForEach-Object {"  - $($_.Name): $($_.Enabled)"} | Out-String} catch {$fw = "Firewall info unavailable"}
+
+# Получаем данные Windows Defender
+$defAntivirus = "N/A"
+$defRealtime = "N/A"
 try {
     $def = Get-MpComputerStatus
-    $defStatus = "Antivirus: $($def.AntivirusEnabled)`nReal-time: $($def.RealTimeProtectionEnabled)"
-} catch {$defStatus = "Defender info unavailable"}
-try {$rdp = if ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction 0).fDenyTSConnections -eq 1) {'Disabled'} else {'Enabled'}} catch {$rdp = "RDP status unavailable"}
+    $defAntivirus = $def.AntivirusEnabled
+    $defRealtime = $def.RealTimeProtectionEnabled
+} catch {
+    $defStatus = "Defender info unavailable"
+}
+
+try {
+    $rdp = if ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction 0).fDenyTSConnections -eq 1) {'Disabled'} else {'Enabled'}
+} catch {
+    $rdp = "RDP status unavailable"
+}
 
 # Дополнительная информация
 try {$conn = Get-NetTCPConnection -State Established | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort -First 5 | ForEach-Object {"- $($_.LocalAddress):$($_.LocalPort) -> $($_.RemoteAddress):$($_.RemotePort)"} | Out-String} catch {$conn = "Connections unavailable"}
@@ -69,8 +81,8 @@ $wifi
 === SECURITY STATUS ===
 Firewall: 
 $fw
-Windows Defender: $($def.AntivirusEnabled)
-Real-time Protection: $($def.RealTimeProtectionEnabled)
+Windows Defender: $defAntivirus
+Real-time Protection: $defRealtime
 RDP Access: $rdp
 
 === INSTALLED SOFTWARE ===
