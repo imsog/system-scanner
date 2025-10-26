@@ -1,43 +1,31 @@
-# Полная очистка кейлоггера
-Write-Host "🧹 Начинаем очистку кейлоггера..." -ForegroundColor Yellow
-
-# 1. Останавливаем все процессы PowerShell (осторожно!)
-Get-Process -Name "powershell" -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -like "*monitor*" -or 
-    $_.CommandLine -like "*vulcan*" -or
-    $_.CommandLine -like "*logger*"
-} | Stop-Process -Force
-
-# 2. Удаляем все файлы кейлоггера
-$filesToDelete = @(
-    "system_monitor.ps1",
-    "vulcan_monitor.ps1", 
-    "vulcan_debug.ps1",
-    "vulcan_logger_advanced.ps1",
-    "vulcan_logger_timer.ps1",
-    "vulcan_simple.ps1"
-)
-
-foreach ($file in $filesToDelete) {
-    Remove-Item "$env:TEMP\$file" -Force -ErrorAction SilentlyContinue
+# Проверяем что процессов нет
+$processes = Get-Process | Where-Object { 
+    $_.ProcessName -eq "powershell" -and 
+    ($_.CommandLine -like "*monitor*" -or $_.CommandLine -like "*vulcan*")
+}
+if ($processes) {
+    Write-Host "❌ Найдены процессы кейлоггера!" -ForegroundColor Red
+    $processes | Stop-Process -Force
+} else {
+    Write-Host "✅ Процессы кейлоггера не найдены" -ForegroundColor Green
 }
 
-# 3. Удаляем все записи автозагрузки
-$registryEntries = @(
-    "SystemMonitor",
-    "VulcanMonitor", 
-    "VulcanDebug",
-    "WindowsMonitor"
-)
-
-foreach ($entry in $registryEntries) {
-    Remove-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $entry -ErrorAction SilentlyContinue
+# Проверяем что файлов нет
+$files = Get-ChildItem "$env:TEMP\*vulcan*.ps1" -ErrorAction SilentlyContinue
+if ($files) {
+    Write-Host "❌ Найдены файлы кейлоггера!" -ForegroundColor Red
+    $files | Remove-Item -Force
+} else {
+    Write-Host "✅ Файлы кейлоггера не найдены" -ForegroundColor Green
 }
 
-# 4. Очищаем временные файлы
-Remove-Item "$env:TEMP\Cookies_*" -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item "$env:TEMP\Cookies_*.zip" -Force -ErrorAction SilentlyContinue
-
-Write-Host "✅ Кейлоггер полностью удален!" -ForegroundColor Green
-Write-Host "📁 Файлы удалены из: $env:TEMP" -ForegroundColor Cyan
-Write-Host "🔧 Автозагрузка очищена" -ForegroundColor Cyan
+# Проверяем автозагрузку
+$registry = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -ErrorAction SilentlyContinue
+$suspiciousEntries = $registry.PSObject.Properties | Where-Object { 
+    $_.Name -like "*Monitor*" -or $_.Name -like "*vulcan*"
+}
+if ($suspiciousEntries) {
+    Write-Host "❌ Найдены записи в автозагрузке!" -ForegroundColor Red
+} else {
+    Write-Host "✅ Автозагрузка чиста" -ForegroundColor Green
+}
