@@ -159,7 +159,7 @@ while ($true) {
                             $items = Get-ChildItem -Path $currentDir -Force
                             $fileList = @()
                             foreach ($item in $items) {
-                                $type = if ($item.PSIsContainer) { "ПАПКА" } else { "ФАЙЛ" }
+                                $type = if ($item.PSIsContainer) { "📁" } else { "📄" }
                                 $size = if (!$item.PSIsContainer -and $item.Length) { " ($([math]::Round($item.Length/1KB,2)) KB)" } else { "" }
                                 $fileList += "$type $($item.Name)$size - $($item.LastWriteTime.ToString('dd.MM.yyyy HH:mm'))"
                             }
@@ -181,16 +181,15 @@ $($fileList -join "`n")"
                                 }
                             }
                             
-                            # Отправляем содержимое новой директории
+                            # Отправляем содержимое новой директории с помощью /ls
                             $items = Get-ChildItem -Path $currentDir -Force
                             $fileList = @()
                             foreach ($item in $items) {
-                                $type = if ($item.PSIsContainer) { "ПАПКА" } else { "ФАЙЛ" }
+                                $type = if ($item.PSIsContainer) { "📁" } else { "📄" }
                                 $size = if (!$item.PSIsContainer -and $item.Length) { " ($([math]::Round($item.Length/1KB,2)) KB)" } else { "" }
                                 $fileList += "$type $($item.Name)$size"
                             }
-                            Send-Telegram "Текущая директория: $currentDir
-Содержимое:
+                            Send-Telegram "/ls $currentDir
 $($fileList -join "`n")"
                         }
                         "^/download (.+)$" {
